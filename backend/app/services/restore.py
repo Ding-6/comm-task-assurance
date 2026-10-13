@@ -47,7 +47,7 @@ def _candidates(db: Session, link_code: str) -> List[TaskLinkBinding]:
         db.scalars(
             select(TaskLinkBinding)
             .where(TaskLinkBinding.link_code == link_code)
-            .order_by(TaskLinkBinding.assigned_min.desc())
+            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
         )
     )
     if not all_bindings:
@@ -61,7 +61,7 @@ def _candidates(db: Session, link_code: str) -> List[TaskLinkBinding]:
         latest: Optional[TaskLinkBinding] = db.scalar(
             select(TaskLinkBinding)
             .where(TaskLinkBinding.task_code == tc)
-            .order_by(TaskLinkBinding.assigned_min.desc())
+            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
             .limit(1)
         )
         if latest is not None and latest.link_code != link_code:
@@ -70,21 +70,30 @@ def _candidates(db: Session, link_code: str) -> List[TaskLinkBinding]:
 
 
 def _current_load_on_link(db: Session, link_code: str, at_min: int) -> float:
-    """链路当前 at_min 时刻的实时占用（按最新归属聚合）。"""
-    bindings: List[TaskLinkBinding] = list(
+    """链路当前 at_min 时刻的实时占用（仅计「全局最新」归属在本链路的任务）。"""
+    # 收集曾经在本链路出现过的 task_code
+    candidate_task_codes: Set[str] = set(
         db.scalars(
-            select(TaskLinkBinding)
+            select(TaskLinkBinding.task_code)
             .where(TaskLinkBinding.link_code == link_code)
-            .order_by(TaskLinkBinding.assigned_min.desc())
+            .distinct()
         )
     )
-    task_codes: Set[str] = set()
-    for b in bindings:
-        if b.task_code in task_codes:
-            continue
-        task_codes.add(b.task_code)
+    if not candidate_task_codes:
+        return 0.0
+    # 过滤：只保留「全局最新归属 == link_code」的任务
+    actual_task_codes: List[str] = []
+    for tc in candidate_task_codes:
+        global_latest = db.scalar(
+            select(TaskLinkBinding)
+            .where(TaskLinkBinding.task_code == tc)
+            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
+            .limit(1)
+        )
+        if global_latest is not None and global_latest.link_code == link_code:
+            actual_task_codes.append(tc)
     total: float = 0.0
-    for tc in task_codes:
+    for tc in actual_task_codes:
         total += _active_demand(db, tc, at_min)
     return total
 
@@ -113,15 +122,17 @@ def handle_link_restored(
     if link is None:
         raise ValueError(f"链路不存在: {link_code}")
     if link.oper_state != "up":
-        # 软处理：不抛错，写事件 + 推 toast + 返回空
+        # 软处理：把链路置 up（恢复通知），再继续回迁流程
+        prev_state: str = link.oper_state
+        link.oper_state = "up"
         db.add(
             SceneEvent(
-                event_code=f"EVT-RS-NOOP-{datetime.now().strftime('%H%M%S%f')}",
+                event_code=f"EVT-RS-UP-{datetime.now().strftime('%H%M%S%f')}",
                 event_type="state_changed",
                 ref_type="link",
                 ref_code=link_code,
                 occur_min=now,
-                summary=f"{link_code} 状态为 {link.oper_state}，跳过回迁",
+                summary=f"{link_code} {prev_state} -> up（恢复通知）",
             )
         )
         db.flush()
@@ -131,17 +142,11 @@ def handle_link_restored(
             "toast",
             {
                 "level": "info",
-                "message": f"{link_code} 当前状态 {link.oper_state}，无可回迁任务",
+                "message": f"{link_code} {prev_state} -> up",
                 "link_code": link_code,
             },
         )
-        return {
-            "link_code": link_code,
-            "restored_tasks": [],
-            "skipped_tasks": [],
-            "released_links": [],
-            "released_link_code": link_code,
-        }
+        # 不 return，继续往下走正常的回迁候选扫描
 
     capacity: float = float(link.capacity_gbps or 0)
     warning: float = float(link.warning_gbps or 0)
@@ -204,17 +209,24 @@ def handle_link_restored(
             db.scalars(
                 select(TaskLinkBinding)
                 .where(TaskLinkBinding.link_code == holder)
-                .order_by(TaskLinkBinding.assigned_min.desc())
+                .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
             )
         )
-        # 折叠：每个 task_code 取最新一条；只有最新归属是 holder 的才算「holder 还有任务」
+        # 折叠：每个 task_code 取 holder 上「最新」一条；并验证它的「全局最新」就是 holder
+        # 否则只算历史，不算「当前还有任务」
         seen: Set[str] = set()
         any_task: bool = False
         for b in holder_bindings:
             if b.task_code in seen:
                 continue
             seen.add(b.task_code)
-            if b.link_code == holder:
+            global_latest = db.scalar(
+                select(TaskLinkBinding)
+                .where(TaskLinkBinding.task_code == b.task_code)
+                .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
+                .limit(1)
+            )
+            if global_latest is not None and global_latest.link_code == holder:
                 any_task = True
                 break
         if not any_task:

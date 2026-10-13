@@ -33,7 +33,7 @@ def _load_fault_tasks(db: Session, link_code: str) -> List[TaskLinkBinding]:
         db.scalars(
             select(TaskLinkBinding)
             .where(TaskLinkBinding.link_code == link_code)
-            .order_by(TaskLinkBinding.assigned_min.desc())
+            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
         )
     )
     latest: Dict[str, TaskLinkBinding] = {}
@@ -77,9 +77,9 @@ def _compute_predicted_load_after(
     target_bindings: List[TaskLinkBinding] = list(
         db.scalars(
             select(TaskLinkBinding)
-            .where(TaskLinkBinding.link_code == target_link_code)
-            .order_by(TaskLinkBinding.assigned_min.desc())
-        )
+        .where(TaskLinkBinding.link_code == target_link_code)
+        .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
+    )
     )
     target_task_codes: List[str] = []
     seen: set[str] = set()

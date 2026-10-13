@@ -404,7 +404,7 @@ def _execute_reroute(db: Session, plan: CommPlan, now: int) -> None:
         db.scalars(
             select(TaskLinkBinding)
             .where(TaskLinkBinding.link_code == fault_code)
-            .order_by(TaskLinkBinding.assigned_min.desc())
+            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
         )
     )
     latest: Dict[str, TaskLinkBinding] = {}

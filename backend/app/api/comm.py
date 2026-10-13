@@ -180,6 +180,7 @@ def recv_repair(payload: RepairReceiveIn, db: Session = Depends(get_db)) -> ApiR
         order_code=payload.order_code,
         est_finish_min=est_abs,
         actual_finish_min=actual_abs,
+        as_of_min=payload.as_of_min,
     )
     db.commit()
     return ApiResponse(
@@ -217,23 +218,27 @@ def handle_input(payload: InputIn, db: Session = Depends(get_db)) -> ApiResponse
     if minute_offset is not None and sub in ("link_down", "performance_degrade", "demand_change"):
         now = get_clock().now_min()
         occur = now + int(minute_offset)
-        # 故障预订：ref_type=alarm / ref_code=link_code 占位
-        # 需求预订：ref_type=demand / ref_code=f"D-{task_code[2:]}-BOOK"
+        ts_suffix: str = datetime.now().strftime("%H%M%S%f")
         if sub in ("link_down", "performance_degrade"):
             ref_type = "alarm"
             ref_code = params.get("link_code")
+            summary = f"{minute_offset} 分钟后 {sub} -> {params.get('link_code')}"
         else:
             ref_type = "demand"
-            ref_code = f"D-{params['task_code'][2:]}-BOOK"
+            # 需求预订用唯一 ref_code（带时间戳后缀），避免同 task 多次预订被 ref_code 唯一约束挡掉
+            ref_code = f"D-{params['task_code'][2:]}-BK{ts_suffix}"
+            # 编码 task= / gbps= 供 _dispatch_booking 解析
+            summary = (
+                f"task={params['task_code']};gbps={params['demand_gbps']};"
+                f"{minute_offset} 分钟后需求变更"
+            )
         ev = SceneEvent(
-            event_code=f"EVT-BK-{datetime.now().strftime('%H%M%S%f')}",
+            event_code=f"EVT-BK-{ts_suffix}",
             event_type="task_booked",
             ref_type=ref_type,
             ref_code=ref_code,
             occur_min=occur,
-            summary=(
-                f"{minute_offset} 分钟后 {sub} -> {params.get('link_code') or params.get('task_code')}"
-            ),
+            summary=summary,
         )
         db.add(ev)
         db.commit()

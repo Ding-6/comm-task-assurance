@@ -51,7 +51,7 @@ def _load_link_tasks(
         db.scalars(
             select(TaskLinkBinding)
             .where(TaskLinkBinding.link_code == link_code)
-            .order_by(TaskLinkBinding.assigned_min.desc())
+            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
         )
     )
     if not bindings:

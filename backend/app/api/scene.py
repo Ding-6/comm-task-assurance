@@ -58,10 +58,12 @@ def decide(payload: SceneDecideIn, db: Session = Depends(_get_db)) -> ApiRespons
     if not target:
         return ApiResponse(code=400, message="plan_code / approval_code 必填")
     if payload.approval_code and not payload.plan_code:
-        # 老路径：通过 approval_code 反查 plan_code
+        # 老路径：先查 ApprovalRecord；查不到时按 create_or_get_approval 的占位编码 APV-{plan} 剥前缀
         ap: ApprovalRecord | None = db.get(ApprovalRecord, target)
         if ap is not None and ap.plan_code:
             target = ap.plan_code
+        elif target.startswith("APV-"):
+            target = target[len("APV-"):]
     decided = decide_approval(
         db,
         approval_code=target,

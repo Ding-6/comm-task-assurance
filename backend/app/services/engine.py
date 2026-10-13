@@ -563,7 +563,7 @@ def get_state(db: Optional[Session] = None) -> Dict[str, Any]:
         # 链路承载映射
         bindings: List[TaskLinkBinding] = list(
             db.scalars(
-                select(TaskLinkBinding).order_by(TaskLinkBinding.assigned_min.desc())
+                select(TaskLinkBinding).order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
             )
         )
         carrier: Dict[str, str] = {}
@@ -711,19 +711,26 @@ def _dispatch_parsed(db: Session, parsed: Dict[str, Any]) -> Dict[str, Any]:
     if minute_offset is not None and sub in ("link_down", "performance_degrade", "demand_change"):
         now = get_clock().now_min()
         occur = now + int(minute_offset)
+        ts_suffix: str = datetime.now().strftime("%H%M%S%f")
         if sub in ("link_down", "performance_degrade"):
             ref_type = "alarm"
             ref_code = params.get("link_code")
+            summary = f"{minute_offset} 分钟后 {sub} -> {params.get('link_code')}"
         else:
             ref_type = "demand"
-            ref_code = f"D-{params['task_code'][2:]}-BOOK"
+            # 唯一 ref_code（带时间戳），编码 task= / gbps=
+            ref_code = f"D-{params['task_code'][2:]}-BK{ts_suffix}"
+            summary = (
+                f"task={params['task_code']};gbps={params['demand_gbps']};"
+                f"{minute_offset} 分钟后需求变更"
+            )
         ev = SceneEvent(
-            event_code=f"EVT-BK-{datetime.now().strftime('%H%M%S%f')}",
+            event_code=f"EVT-BK-{ts_suffix}",
             event_type="task_booked",
             ref_type=ref_type,
             ref_code=ref_code,
             occur_min=occur,
-            summary=f"{minute_offset} 分钟后 {sub} -> {params.get('link_code') or params.get('task_code')}",
+            summary=summary,
         )
         db.add(ev)
         return {"booking": {"event_code": ev.event_code, "occur_min": occur}}
