@@ -131,8 +131,14 @@ components:
         est_finish_min:
           type: integer
           description: 相对当前场景分钟的预计完成时长（分钟）。接口层转换为绝对场景分钟。
-        actual_finish_min: { type: integer, nullable: true }
-        as_of_min: { type: integer, nullable: true }
+        actual_finish_min:
+          type: integer
+          nullable: true
+          description: 相对基准分钟的实际完成时长（分钟）。接口层转换为绝对场景分钟。语义同 est_finish_min。
+        as_of_min:
+          type: integer
+          nullable: true
+          description: 相对时长的基准场景分钟；缺省为当前场景分钟。
 
     RepairOrderOut:
       type: object

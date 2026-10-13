@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 测试 / 缓存
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# 本地配置
+.env
+*.local
+
+# CLI 评审输出（CodeRabbit / CodeReview）
+cr_review*.ndjson
+cr_review*.log
+
+# 日志
+*.log
