@@ -88,13 +88,16 @@ CREATE TABLE comm_alarm (
 -- 5. comm_task_link 任务链路归属历史
 -- ============================================================
 CREATE TABLE comm_task_link (
+  id            INT         NOT NULL AUTO_INCREMENT,
   task_code     varchar(32) NOT NULL,
   link_code     varchar(32) NOT NULL,
   assigned_min  int         NOT NULL,
   note          varchar(128) NULL,
-  PRIMARY KEY (task_code, assigned_min)
+  PRIMARY KEY (id),
+  INDEX idx_task_link_task (task_code),
+  INDEX idx_task_link_link (link_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='任务链路归属历史';
+  COMMENT='任务链路归属历史（surrogate id 主键，避免同分钟重复切换 PK 冲突）';
 
 -- ============================================================
 -- 6. comm_approval 审批记录
@@ -193,7 +196,9 @@ INSERT INTO comm_task_link VALUES
 ('T-B','L-2H',0,'场景初始归属'),
 ('T-C','L-2H',0,'场景初始归属');
 
--- 2 条预置预订事件（到点兑现）
+-- 2条预置预订事件（到点兑现）
+-- EVT-0001：T+15 注入 L-1H link_down 告警（ref_code 即 link_code）
+-- EVT-0002：T+50 注入 D-B2 需求（ref_code 需求码；summary 编码 task= 与 gbps=）
 INSERT INTO comm_event VALUES
-('EVT-0001','task_booked','alarm','AL-01',15,'15分钟后线路1故障，预订为T+15兑现'),
-('EVT-0002','task_booked','demand','D-B2',50,'50分钟后直播需求到6.00G，预订为T+50兑现');
+('EVT-0001','task_booked','alarm','L-1H',15,'15分钟后线路1故障，预订为T+15兑现'),
+('EVT-0002','task_booked','demand','D-B2',50,'task=T-B;gbps=6.00;50分钟后直播需求到6.00G');

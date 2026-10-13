@@ -53,12 +53,18 @@ def reset() -> ApiResponse:
 
 @router.post("/decide", response_model=ApiResponse)
 def decide(payload: SceneDecideIn, db: Session = Depends(_get_db)) -> ApiResponse:
-    ap: ApprovalRecord | None = db.get(ApprovalRecord, payload.approval_code)
-    if ap is None:
-        return ApiResponse(code=404, message="审批单不存在")
+    # 优先 plan_code（SK-04 规范）；兼容旧 approval_code
+    target = payload.plan_code or payload.approval_code
+    if not target:
+        return ApiResponse(code=400, message="plan_code / approval_code 必填")
+    if payload.approval_code and not payload.plan_code:
+        # 老路径：通过 approval_code 反查 plan_code
+        ap: ApprovalRecord | None = db.get(ApprovalRecord, target)
+        if ap is not None and ap.plan_code:
+            target = ap.plan_code
     decided = decide_approval(
         db,
-        approval_code=payload.approval_code,
+        approval_code=target,
         decision=payload.decision,
         approver="ROLE-APPROVER",
         decision_source="人工",

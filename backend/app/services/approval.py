@@ -231,7 +231,7 @@ async def _do_decide(
     recalc_all(db, as_of_min=now)
     db.flush()
 
-    # 7. ws modal_close
+    # 7. ws modal_close（async 路径上可直接 await broadcast）
     await get_hub().broadcast(
         "modal_close",
         {
@@ -259,20 +259,27 @@ def decide_sync(
     approver: str = "ROLE-APPROVER",
     decision_source: str = "人工",
 ) -> Dict[str, Any]:
-    """同步入口：阻塞跑 _do_decide 在事件循环里。"""
+    """同步入口：从同步路由调用时，把 async 任务投到主 loop 执行并阻塞等待。
+
+    绝不在子线程跑 asyncio.run —— 子线程的 loop 会和主 loop 上的 ws 客户端冲突，
+    死锁所有广播。
+    """
     try:
+        # 已处在主 loop 的 async 上下文里？直接 await
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # 没在事件循环里（极少见，单元测试场景），直接执行同步部分（不带 cancel 等待）
+        loop = _get_main_loop()
+
+    if loop is None or loop.is_closed():
+        # 没有任何事件循环：只能走纯同步路径
         return _do_decide_sync(db, plan_code, decision, reason, approver, decision_source)
 
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(
-            asyncio.run,
-            _do_decide(db, plan_code, decision, reason, approver, decision_source),
-        )
-        return future.result()
+    # 在主 loop 上调度并阻塞等结果
+    future = asyncio.run_coroutine_threadsafe(
+        _do_decide(db, plan_code, decision, reason, approver, decision_source),
+        loop,
+    )
+    return future.result()
 
 
 def _do_decide_sync(

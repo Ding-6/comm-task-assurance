@@ -34,7 +34,7 @@ from app.schemas.comm import (
     RepairRequestIn,
     TaskOut,
 )
-from app.services.approval import decide_approval, start_countdown
+from app.services.approval import decide_approval
 from app.services.intent import parse_input, recognize_intent
 from app.services.occupancy import update_link_loads
 from app.services.plan import generate_plans_for_alarm
@@ -152,13 +152,7 @@ async def decide(payload: ApprovalIn, db: Session = Depends(get_db)) -> ApiRespo
 
 
 def create_or_get_approval(db: Session, plan_code: str) -> str:
-    """为方案启动 60s 超时倒计时（按 alarm_code 维度挂载）。"""
-    from app.models.plan import CommPlan  # 局部导入避免循环
-
-    plan: Optional[CommPlan] = db.get(CommPlan, plan_code)
-    if plan is None:
-        raise ValueError(f"方案不存在: {plan_code}")
-    start_countdown(plan.alarm_code, plan_code, timeout_sec=60)
+    """仅返回审批单编号；倒计时在 plan.generate_plans 中启动。"""
     return f"APV-{plan_code}"
 
 
@@ -173,11 +167,24 @@ def req_repair(payload: RepairRequestIn, db: Session = Depends(get_db)) -> ApiRe
 # ---------- SK-06 修理回执评估 ----------
 @router.post("/repairs/receive", response_model=ApiResponse)
 def recv_repair(payload: RepairReceiveIn, db: Session = Depends(get_db)) -> ApiResponse:
-    order = evaluate_repair_receipt(
-        db, order_code=payload.order_code, est_finish_min=payload.est_finish_min
+    # 入参 est/actual_finish_min 是"相对时长"；转换为绝对场景分钟
+    from app.core.scene_clock import get_clock as _gc
+
+    now = payload.as_of_min if payload.as_of_min is not None else _gc().now_min()
+    est_abs = now + payload.est_finish_min
+    actual_abs = (
+        now + payload.actual_finish_min if payload.actual_finish_min is not None else None
+    )
+    result = handle_repair_update(
+        db,
+        order_code=payload.order_code,
+        est_finish_min=est_abs,
+        actual_finish_min=actual_abs,
     )
     db.commit()
-    return ApiResponse(data=RepairOrderOut.model_validate(order, from_attributes=True))
+    return ApiResponse(
+        data=RepairOrderOut.model_validate(result["order"], from_attributes=True)
+    )
 
 
 # ---------- SK-07 链路恢复回迁 ----------
@@ -301,8 +308,16 @@ def _dispatch_legacy(db: Session, data: Any, intent: dict) -> ApiResponse:
         ap = decide_approval(db, intent["approval_code"], "拒绝", "ROLE-APPROVER", "人工")
         data["result"] = ApprovalOut.model_validate(ap, from_attributes=True).model_dump()
     elif name == "repair_receipt" and intent.get("order_code"):
-        order = evaluate_repair_receipt(db, intent["order_code"], est_finish_min=30)
-        data["result"] = RepairOrderOut.model_validate(order, from_attributes=True).model_dump()
+        # SK-10 输入框隐式约定 est_finish_min=30 相对时长
+        from app.core.scene_clock import get_clock as _gc
+
+        now = _gc().now_min()
+        result = handle_repair_update(
+            db,
+            order_code=intent["order_code"],
+            est_finish_min=now + 30,
+        )
+        data["result"] = RepairOrderOut.model_validate(result["order"], from_attributes=True).model_dump()
     elif name == "restore":
         data["result"] = handle_link_restored(db, intent["link_code"])
     else:

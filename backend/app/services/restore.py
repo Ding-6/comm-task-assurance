@@ -113,9 +113,35 @@ def handle_link_restored(
     if link is None:
         raise ValueError(f"链路不存在: {link_code}")
     if link.oper_state != "up":
-        raise ValueError(
-            f"链路未处于 up 状态，无法回迁: {link_code} state={link.oper_state}"
+        # 软处理：不抛错，写事件 + 推 toast + 返回空
+        db.add(
+            SceneEvent(
+                event_code=f"EVT-RS-NOOP-{datetime.now().strftime('%H%M%S%f')}",
+                event_type="state_changed",
+                ref_type="link",
+                ref_code=link_code,
+                occur_min=now,
+                summary=f"{link_code} 状态为 {link.oper_state}，跳过回迁",
+            )
         )
+        db.flush()
+        from app.services.engine import safe_push
+
+        safe_push(
+            "toast",
+            {
+                "level": "info",
+                "message": f"{link_code} 当前状态 {link.oper_state}，无可回迁任务",
+                "link_code": link_code,
+            },
+        )
+        return {
+            "link_code": link_code,
+            "restored_tasks": [],
+            "skipped_tasks": [],
+            "released_links": [],
+            "released_link_code": link_code,
+        }
 
     capacity: float = float(link.capacity_gbps or 0)
     warning: float = float(link.warning_gbps or 0)
@@ -181,17 +207,16 @@ def handle_link_restored(
                 .order_by(TaskLinkBinding.assigned_min.desc())
             )
         )
-        # 折叠：每个 task_code 取最新一条
+        # 折叠：每个 task_code 取最新一条；只有最新归属是 holder 的才算「holder 还有任务」
         seen: Set[str] = set()
         any_task: bool = False
         for b in holder_bindings:
             if b.task_code in seen:
                 continue
             seen.add(b.task_code)
-            # 关键判断：这条最新归属是否仍然在 holder 上
-            # 因为我们要看「现在还有没有任务最新归属是 holder」
-            any_task = True
-            break
+            if b.link_code == holder:
+                any_task = True
+                break
         if not any_task:
             released_links.append(holder)
             # 把 holder 的占用字段清零（可视为释放）
@@ -247,17 +272,12 @@ def _after_restore(
         + (f"，任务回迁完成（{len(restored)} 个）" if restored else "（无任务回迁）")
     )
 
-    async def _push() -> None:
-        await get_hub().broadcast(
-            "toast",
-            {"level": "info", "message": msg, "link_code": link_code},
-        )
+    from app.services.engine import safe_push
 
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_push())
-    except RuntimeError:
-        pass
+    safe_push(
+        "toast",
+        {"level": "info", "message": msg, "link_code": link_code},
+    )
 
 
 # ---------- 兼容旧接口 ----------

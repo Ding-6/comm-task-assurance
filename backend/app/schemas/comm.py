@@ -117,10 +117,16 @@ class RepairRequestIn(BaseModel):
 
 
 class RepairReceiveIn(BaseModel):
-    """SK-06 修理回执入参。"""
+    """SK-06 修理回执入参。
+
+    est_finish_min / actual_finish_min：相对当前场景分钟数的"预计/实际时长"（分钟）。
+    接口层会转换为绝对场景分钟再写入 comm_repair_order。
+    """
 
     order_code: str
     est_finish_min: int
+    actual_finish_min: Optional[int] = None
+    as_of_min: Optional[int] = None
 
 
 class RepairOrderOut(BaseModel):

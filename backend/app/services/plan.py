@@ -124,9 +124,15 @@ def _compute_predicted_load_after(
 # ---------- 主流程 ----------
 
 def generate_plans(
-    db: Session, alarm_link_code: str, as_of_min: Optional[int] = None
+    db: Session,
+    alarm_link_code: str,
+    as_of_min: Optional[int] = None,
+    _override_alarm_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     """识别资源异常后生成处置方案（repair + reroute），并触发审批流程。
+
+    _override_alarm_code：可选，强制使用传入的 alarm_code 而不是从该链路
+    最新容量超限告警中查找。用于让"某个具体告警 → 自己的方案"显式关联。
 
     返回：
         {
@@ -149,15 +155,19 @@ def generate_plans(
     dead_line: int = _critical_deadline(db)
 
     # 3. 找到触发告警
-    cap_alarm: Optional[ResourceAlarm] = db.scalar(
-        select(ResourceAlarm)
-        .where(
-            ResourceAlarm.link_code == alarm_link_code,
-            ResourceAlarm.alarm_type == "容量超限",
+    cap_alarm: Optional[ResourceAlarm] = None
+    if _override_alarm_code is not None:
+        cap_alarm = db.get(ResourceAlarm, _override_alarm_code)
+    if cap_alarm is None:
+        cap_alarm = db.scalar(
+            select(ResourceAlarm)
+            .where(
+                ResourceAlarm.link_code == alarm_link_code,
+                ResourceAlarm.alarm_type == "容量超限",
+            )
+            .order_by(ResourceAlarm.event_min.desc())
+            .limit(1)
         )
-        .order_by(ResourceAlarm.event_min.desc())
-        .limit(1)
-    )
     if cap_alarm is None:
         # 兜底：取该链路最新一条任意告警
         cap_alarm = db.scalar(
@@ -276,23 +286,28 @@ def generate_plans(
         for p in plans
     ]
 
-    async def _push() -> None:
-        await get_hub().broadcast(
-            "modal_approval",
-            {
-                "plans": payload_plans,
-                "countdown": 60,
-                "deadline_min": dead_line,
-                "alarm_code": alarm_code,
-                "link_code": alarm_link_code,
-            },
-        )
+    from app.services.engine import safe_push
 
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_push())
-    except RuntimeError:
-        pass
+    # 8. ws 推送 modal_approval
+    safe_push(
+        "modal_approval",
+        {
+            "plans": payload_plans,
+            "countdown": 60,
+            "deadline_min": dead_line,
+            "alarm_code": alarm_code,
+            "link_code": alarm_link_code,
+        },
+    )
+
+    # 9. 启动 60 秒倒计时（修复 M9：原 api/comm.create_or_get_approval 启动会被同步路由 cancel，移到这里）
+    if plans:
+        try:
+            from app.services.approval import start_countdown
+
+            start_countdown(alarm_code, plans[0].plan_code, timeout_sec=60)
+        except Exception:
+            pass
 
     return {
         "plans": plans,
@@ -304,9 +319,9 @@ def generate_plans(
 # ---------- 兼容旧接口 ----------
 
 def generate_plans_for_alarm(db: Session, alarm_code: str) -> List[CommPlan]:
-    """兼容旧调用：按 alarm_code 找链路，转调 generate_plans。"""
+    """兼容旧调用：透传 alarm_code 关联到方案。"""
     alarm: Optional[ResourceAlarm] = db.get(ResourceAlarm, alarm_code)
     if alarm is None:
         return []
-    result = generate_plans(db, alarm.link_code)
+    result = generate_plans(db, alarm.link_code, _override_alarm_code=alarm_code)
     return result.get("plans", [])

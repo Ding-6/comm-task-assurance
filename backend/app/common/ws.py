@@ -35,7 +35,7 @@ class WsHub:
         """向所有连接广播一条消息。"""
         if not self._clients:
             return
-        msg = json.dumps({"type": message_type, "payload": payload}, ensure_ascii=False)
+        msg = json.dumps({"type": message_type, "data": payload}, ensure_ascii=False)
         dead: list[WebSocket] = []
         for ws in list(self._clients):
             try:

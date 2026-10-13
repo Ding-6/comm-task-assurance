@@ -167,22 +167,17 @@ def handle_repair_update(
                 for p in pending_plans
             ]
 
-            async def _push() -> None:
-                await get_hub().broadcast(
-                    "modal_refresh",
-                    {
-                        "order_code": order_code,
-                        "link_code": order.link_code,
-                        "plans": payload_plans,
-                        "reset_countdown": False,
-                    },
-                )
+            from app.services.engine import safe_push
 
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_push())
-            except RuntimeError:
-                pass
+            safe_push(
+                "modal_refresh",
+                {
+                    "order_code": order_code,
+                    "link_code": order.link_code,
+                    "plans": payload_plans,
+                    "reset_countdown": False,
+                },
+            )
 
     # ---------- 2. 完成 ----------
     if actual_finish_min is not None:

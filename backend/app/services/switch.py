@@ -190,17 +190,12 @@ def handle_link_down(
         title = "链路中断"
         message = f"{alarm_link_code} 链路中断，无可用目标链路"
 
-    async def _push(title: str = title, message: str = message) -> None:
-        await get_hub().broadcast(
-            "modal_notice",
-            {"title": title, "message": message, "level": "info"},
-        )
+    from app.services.engine import safe_push
 
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_push())
-    except RuntimeError:
-        pass
+    safe_push(
+        "modal_notice",
+        {"title": title, "message": message, "level": "info"},
+    )
 
     # 9. 返回
     return {

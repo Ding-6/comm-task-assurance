@@ -25,9 +25,13 @@ class SceneStartIn(BaseModel):
 
 # ---------- 决策 ----------
 class SceneDecideIn(BaseModel):
-    """引擎级决策入参（与审批合并）。"""
+    """引擎级决策入参（与审批合并）。
 
-    approval_code: str
+    优先使用 plan_code（直接对方案决策）。如传 approval_code 则按旧路径兼容。
+    """
+
+    plan_code: Optional[str] = None
+    approval_code: Optional[str] = None
     decision: str = Field(description="批准 / 拒绝")
     reason: Optional[str] = None
 

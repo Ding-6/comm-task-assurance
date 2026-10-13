@@ -36,14 +36,10 @@ _EST_RE = re.compile(r"(?:预计|约)?\s*(\d+)\s*(?:分钟|分)(?:完成|修好|
 
 def _extract_link(text: str) -> Optional[str]:
     """从文本里识别链路编码。"""
-    # 1. 直接匹配 L-xH 形式
-    m = re.search(r"L-?\dH", text, re.IGNORECASE)
+    # 1. 规范化 L-xH / LxH → L-{1|2|3}H
+    m = re.search(r"L-?([123])H", text, re.IGNORECASE)
     if m:
-        s = m.group(0).upper().replace("L", "L-").replace("L-", "L-")
-        if not s.startswith("L-"):
-            s = "L-" + s[1:]
-        if s in ("L-1H", "L-2H", "L-3H"):
-            return s
+        return f"L-{m.group(1)}H"
 
     # 2. 中文关键词
     for kw, code in LINK_KEYWORDS.items():

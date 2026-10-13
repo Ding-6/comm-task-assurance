@@ -32,10 +32,53 @@ from app.services.switch import handle_link_down
 # tick 周期：60 真实秒 = 1 场景分钟（V4.1 固定 1 倍速）
 _TICK_SECONDS: float = 60.0
 _LAST_TICK_AT: Optional[datetime] = None
-_LOOP_TASK: Optional[asyncio.Task[None]] = None
+_LOOP_TASK: Optional[asyncio.Future[None]] = None
 _LOOP_STOP: Optional[asyncio.Event] = None
 # 已被 tick 兑现过的 event_code，避免重复处理
 _CONSUMED_EVENTS: set[str] = set()
+# 主 event loop 引用（由 lifespan 注入）。所有跨线程 ws 推送都通过它
+_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """由 main.py lifespan 调用，注册主 loop 引用。"""
+    global _MAIN_LOOP
+    _MAIN_LOOP = loop
+
+
+def get_main_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """获取主 loop 引用（供其他 service 用）。"""
+    return _MAIN_LOOP
+
+
+def safe_push(message_type: str, payload: Any = None) -> None:
+    """跨线程安全地把 ws 消息投递到主 event loop。
+
+    在同步路由（线程池）或后台任务里调用时，不会触发 RuntimeError，
+    也不会在错的 loop 上 await send_text 死锁 ws 客户端。
+    """
+    if _MAIN_LOOP is None or _MAIN_LOOP.is_closed():
+        return
+    try:
+        coro = get_hub().broadcast(message_type, payload)
+        asyncio.run_coroutine_threadsafe(coro, _MAIN_LOOP)
+    except Exception:
+        # 静默丢弃，避免在热路径上抛错
+        pass
+
+
+def safe_create_task(coro_factory) -> None:
+    """从任意线程安全地把协程投递到主 loop 启动。
+
+    coro_factory 是「无参 callable，返回 coroutine」的工厂；必须无参，因为
+    run_coroutine_threadsafe 不接受 coroutine 之外的参数。
+    """
+    if _MAIN_LOOP is None or _MAIN_LOOP.is_closed():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(coro_factory(), _MAIN_LOOP)
+    except Exception:
+        pass
 
 
 # =====================================================================
@@ -121,30 +164,45 @@ async def _dispatch_booking(db: Session, ev: SceneEvent) -> None:
         )
 
     elif ev.ref_type == "demand" and ev.ref_code:
-        # EVT-0002 形式：ref_code = D-B2（要插入的需求编码）
+        # EVT-0002 形式：ref_code = D-{task}-N 需求码
+        # summary 里编码：task=<T-X>;gbps=<float>;<人类可读描述>
         code: str = ev.ref_code
         existing: Optional[TrafficDemand] = db.get(TrafficDemand, code)
         if existing is not None:
             return
-        # 取出事件 summary 里的 6.00G 速率（兜底默认 6.00）
+        # 解析 summary
+        task_code: str = "T-B"
         gbps: float = 6.00
-        # 简化处理：只支持 D-B2
-        if code == "D-B2":
-            db.add(
-                TrafficDemand(
-                    demand_code="D-B2",
-                    task_code="T-B",
-                    valid_from_min=ev.occur_min,
-                    demand_gbps=gbps,
-                    valid_to_min=None,
-                )
+        if ev.summary:
+            for part in ev.summary.split(";"):
+                kv = part.split("=", 1)
+                if len(kv) != 2:
+                    continue
+                k, v = kv[0].strip(), kv[1].strip()
+                if k == "task":
+                    task_code = v
+                elif k == "gbps":
+                    try:
+                        gbps = float(v)
+                    except ValueError:
+                        pass
+        db.add(
+            TrafficDemand(
+                demand_code=code,
+                task_code=task_code,
+                valid_from_min=ev.occur_min,
+                demand_gbps=gbps,
+                valid_to_min=None,
             )
+        )
         # 推 alert
         await get_hub().broadcast(
             "alert",
             {
                 "type": "demand_added",
                 "demand_code": code,
+                "task_code": task_code,
+                "demand_gbps": gbps,
                 "occur_min": ev.occur_min,
             },
         )
@@ -170,16 +228,17 @@ async def _engine_loop() -> None:
 
 
 def _ensure_loop() -> None:
-    """确保后台 tick 循环在跑。"""
+    """确保后台 tick 循环在跑。
+
+    必须在 main loop 上调度（从同步路由里调时不能 asyncio.get_running_loop），
+    优先用 lifespan 注册的 _MAIN_LOOP；未注册则放弃（lifespan 启动后再调用即可）。
+    """
     global _LOOP_TASK
     if _LOOP_TASK is not None and not _LOOP_TASK.done():
         return
-    try:
-        loop = asyncio.get_running_loop()
-        _LOOP_TASK = loop.create_task(_engine_loop())
-    except RuntimeError:
-        # 没有运行中的事件循环（同步调用场景），跳过
-        _LOOP_TASK = None
+    if _MAIN_LOOP is None or _MAIN_LOOP.is_closed():
+        return
+    _LOOP_TASK = asyncio.run_coroutine_threadsafe(_engine_loop(), _MAIN_LOOP)
 
 
 def _stop_loop() -> None:
@@ -207,14 +266,8 @@ def start_scene() -> Dict[str, Any]:
     finally:
         db.close()
 
-    # 异步推送初始 state
-    async def _push() -> None:
-        await get_hub().broadcast("state", snap)
-
-    try:
-        asyncio.get_running_loop().create_task(_push())
-    except RuntimeError:
-        pass
+    # 异步推送初始 state（跨 loop 安全）
+    safe_push("state", snap)
 
     return snap
 
@@ -245,7 +298,11 @@ def resume_scene() -> Dict[str, Any]:
 
 
 def reset_scene() -> Dict[str, Any]:
-    """复位：停止循环、清空锚点、清空已兑现缓存。"""
+    """复位：停止循环 + 重置时钟 + 清空已兑现缓存 + 重置业务数据为初始状态。
+
+    按依赖顺序：events → approvals → plans → repair_orders → alarms →
+    task_links → demands → tasks → links，避开外键约束。
+    """
     global _LAST_TICK_AT
     _stop_loop()
     clock = get_clock()
@@ -255,6 +312,162 @@ def reset_scene() -> Dict[str, Any]:
 
     db = SessionLocal()
     try:
+        from app.models.approval import ApprovalRecord
+        from app.models.plan import CommPlan
+        from app.models.repair_order import RepairOrder
+        from app.models.alarm import ResourceAlarm
+        from app.models.event import SceneEvent
+        from app.models.task_link import TaskLinkBinding
+        from app.models.demand import TrafficDemand
+        from app.models.task import CommTask
+        from app.models.link import CommLink
+
+        # 按依赖反序清空
+        for cls in (
+            ApprovalRecord,
+            CommPlan,
+            RepairOrder,
+            ResourceAlarm,
+            SceneEvent,
+            TaskLinkBinding,
+            TrafficDemand,
+            CommTask,
+            CommLink,
+        ):
+            db.query(cls).delete()
+            db.flush()
+
+        # 重插初始数据（与 建表脚本.sql 保持一致）
+        db.add_all(
+            [
+                CommLink(
+                    link_code="L-1H",
+                    link_name="指挥通信主用电路",
+                    capacity_gbps=10.00,
+                    warning_gbps=8.00,
+                    oper_state="up",
+                    avg_repair_min=30,
+                    lookahead_min=30,
+                    backup_link_code="L-3H",
+                    current_load_gbps=0.00,
+                    future_load_gbps=0.00,
+                    warn_status="正常",
+                ),
+                CommLink(
+                    link_code="L-2H",
+                    link_name="直播与既有共享电路",
+                    capacity_gbps=10.00,
+                    warning_gbps=8.00,
+                    oper_state="up",
+                    avg_repair_min=30,
+                    lookahead_min=30,
+                    backup_link_code=None,
+                    current_load_gbps=0.00,
+                    future_load_gbps=0.00,
+                    warn_status="正常",
+                ),
+                CommLink(
+                    link_code="L-3H",
+                    link_name="指挥通信备用电路",
+                    capacity_gbps=10.00,
+                    warning_gbps=8.00,
+                    oper_state="up",
+                    avg_repair_min=30,
+                    lookahead_min=30,
+                    backup_link_code=None,
+                    current_load_gbps=0.00,
+                    future_load_gbps=0.00,
+                    warn_status="正常",
+                ),
+            ]
+        )
+        db.flush()
+
+        db.add_all(
+            [
+                CommTask(
+                    task_code="T-A",
+                    task_name="指挥通信保障",
+                    duration_min=120,
+                    critical_min=None,
+                    owner_role="ROLE-DUTY",
+                    current_link_code="L-1H",
+                    initial_demand_gbps=3.00,
+                    lookahead_min=30,
+                ),
+                CommTask(
+                    task_code="T-B",
+                    task_name="直播传输保障",
+                    duration_min=120,
+                    critical_min=50,
+                    owner_role="ROLE-B",
+                    current_link_code="L-2H",
+                    initial_demand_gbps=4.00,
+                    lookahead_min=30,
+                ),
+                CommTask(
+                    task_code="T-C",
+                    task_name="既有传输保障",
+                    duration_min=120,
+                    critical_min=None,
+                    owner_role="ROLE-DUTY",
+                    current_link_code="L-2H",
+                    initial_demand_gbps=2.00,
+                    lookahead_min=30,
+                ),
+            ]
+        )
+        db.flush()
+
+        db.add_all(
+            [
+                TrafficDemand(
+                    demand_code="D-A", task_code="T-A",
+                    valid_from_min=0, demand_gbps=3.00, valid_to_min=None,
+                ),
+                TrafficDemand(
+                    demand_code="D-B1", task_code="T-B",
+                    valid_from_min=0, demand_gbps=4.00, valid_to_min=50,
+                ),
+                TrafficDemand(
+                    demand_code="D-C", task_code="T-C",
+                    valid_from_min=0, demand_gbps=2.00, valid_to_min=None,
+                ),
+            ]
+        )
+        db.flush()
+
+        db.add_all(
+            [
+                TaskLinkBinding(task_code="T-A", link_code="L-1H", assigned_min=0, note="场景初始归属"),
+                TaskLinkBinding(task_code="T-B", link_code="L-2H", assigned_min=0, note="场景初始归属"),
+                TaskLinkBinding(task_code="T-C", link_code="L-2H", assigned_min=0, note="场景初始归属"),
+            ]
+        )
+        db.flush()
+
+        db.add_all(
+            [
+                SceneEvent(
+                    event_code="EVT-0001",
+                    event_type="task_booked",
+                    ref_type="alarm",
+                    ref_code="L-1H",
+                    occur_min=15,
+                    summary="15分钟后线路1故障，预订为T+15兑现",
+                ),
+                SceneEvent(
+                    event_code="EVT-0002",
+                    event_type="task_booked",
+                    ref_type="demand",
+                    ref_code="D-B2",
+                    occur_min=50,
+                    summary="task=T-B;gbps=6.00;50分钟后直播需求到6.00G",
+                ),
+            ]
+        )
+        db.commit()
+
         snap = get_state(db)
     finally:
         db.close()

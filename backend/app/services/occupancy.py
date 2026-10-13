@@ -231,7 +231,7 @@ def calc_occupancy(
 
     db.flush()
 
-    # 11. ws 推送 toast（不阻塞 db session；用 create_task）
+    # 11. ws 推送 toast（跨 loop 安全：safe_create_task）
     if warn_status in ("超预警线", "超容量"):
         if warn_status == "超预警线":
             level = "warn"
@@ -244,18 +244,9 @@ def calc_occupancy(
             message = (
                 f"{link_code} 预测T+{offset}达{round(max_predicted, 2)}G超容量{capacity}G"
             )
+        from app.services.engine import safe_push
 
-        async def _push(level: str = level, message: str = message) -> None:
-            await get_hub().broadcast(
-                "toast", {"level": level, "message": message}
-            )
-
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_push())
-        except RuntimeError:
-            # 没有运行中的事件循环（同步调用场景），静默丢弃
-            pass
+        safe_push("toast", {"level": level, "message": message})
 
     return {
         "link_code": link_code,
