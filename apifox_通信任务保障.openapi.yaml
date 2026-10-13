@@ -1,0 +1,685 @@
+openapi: 3.1.0
+info:
+  title: 通信任务保障后端
+  description: |
+    Apifox 项目「通信任务保障后端」导入文件。
+    - baseUrl: http://localhost:8000
+    - 统一响应：{code: 0, message: "ok", data: ...}，code 非 0 为错误。
+    - V4.1 固定 1 倍速推演，不提供 speed/倍速 接口。
+    - 导入后请在 Apifox 中开启「Mock 服务」即可获得全部接口的 mock 数据。
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: Local Dev
+
+# =====================================================================
+# Schemas
+# =====================================================================
+components:
+  schemas:
+
+    # ---------- 通用 ----------
+    ApiResponse:
+      type: object
+      properties:
+        code: { type: integer, example: 0, description: 0=成功，非 0=错误 }
+        message: { type: string, example: ok }
+        data: {}
+
+    # ---------- 业务 SK-01 ----------
+    Sk01SwitchIn:
+      type: object
+      required: [alarm_link_code]
+      properties:
+        alarm_link_code: { type: string, description: 触发告警的链路编码 }
+        moved_task_code:  { type: string, description: 指定迁移的任务编码（选填） }
+        as_of_min:        { type: integer, description: 模拟相对分钟（选填，缺省=now_min） }
+    Sk01SwitchData:
+      type: object
+      properties:
+        switched_tasks:    { type: array, items: { type: string } }
+        repair_order_code: { type: string }
+
+    # ---------- 业务 SK-02 ----------
+    Sk02OccupancyIn:
+      type: object
+      required: [link_code]
+      properties:
+        link_code: { type: string }
+        as_of_min: { type: integer, nullable: true }
+    Sk02OccupancyData:
+      type: object
+      properties:
+        link_code:                 { type: string }
+        current_load_gbps:         { type: number, format: float }
+        future_load_gbps:          { type: number, format: float }
+        predicted_load_max_gbps:   { type: number, format: float }
+        predicted_min:             { type: integer, nullable: true }
+        warn_status:               { type: string, description: 正常/超预警线/超容量 }
+
+    # ---------- 业务 SK-03 ----------
+    Sk03PlanIn:
+      type: object
+      required: [alarm_link_code]
+      properties:
+        alarm_link_code: { type: string }
+        as_of_min:       { type: integer, nullable: true }
+    PlanItem:
+      type: object
+      properties:
+        plan_code:                 { type: string }
+        plan_type:                 { type: string, description: repair/reroute }
+        is_default:                { type: string, description: 是/否 }
+        can_meet_critical:         { type: string, description: 是/否 }
+        predicted_load_after_gbps: { type: number, format: float, nullable: true }
+        status:                    { type: string, description: 待审批/批准/拒绝/已执行/已作废 }
+        recommendation:            { type: string }
+    Sk03PlanData:
+      type: object
+      properties:
+        plans:
+          type: array
+          items: { $ref: '#/components/schemas/PlanItem' }
+
+    # ---------- 业务 SK-04 / 引擎 decide ----------
+    Sk04ApproveIn:
+      type: object
+      required: [plan_code, decision]
+      properties:
+        plan_code:       { type: string }
+        decision:        { type: string, description: 批准/拒绝 }
+        reason:          { type: string, nullable: true }
+        approver:        { type: string, default: ROLE-APPROVER, nullable: true }
+        decision_source: { type: string, description: 人工/超时自动, nullable: true }
+    Sk04ApproveData:
+      type: object
+      properties:
+        approval_code: { type: string }
+        status:        { type: string, description: 批准/拒绝 }
+        executed:      { type: boolean }
+
+    # ---------- 业务 SK-05 ----------
+    Sk05RepairIn:
+      type: object
+      required: [order_code]
+      properties:
+        order_code:        { type: string }
+        est_finish_min:    { type: integer, nullable: true }
+        actual_finish_min: { type: integer, nullable: true }
+        as_of_min:         { type: integer, nullable: true }
+    PlansUpdatedItem:
+      type: object
+      properties:
+        plan_code:         { type: string }
+        can_meet_critical: { type: string, description: 是/否 }
+        status:            { type: string }
+    Sk05RepairData:
+      type: object
+      properties:
+        order_code:      { type: string }
+        status:          { type: string, description: 已申请/已回执/修复中/已完成 }
+        plans_updated:
+          type: array
+          items: { $ref: '#/components/schemas/PlansUpdatedItem' }
+
+    # ---------- 业务 SK-06 ----------
+    Sk06AlarmIn:
+      type: object
+      required: [link_code, alarm_type, native_severity]
+      properties:
+        link_code:       { type: string }
+        alarm_type:      { type: string, description: link_down/性能劣化 }
+        native_severity: { type: string, description: critical/major/minor/warning }
+        event_min:       { type: integer, nullable: true }
+    Sk06AlarmData:
+      type: object
+      properties:
+        alarm_code:        { type: string }
+        triggered_action:  { type: string, example: ACT-01 }
+
+    # ---------- 业务 SK-07 ----------
+    Sk07RestoreIn:
+      type: object
+      required: [link_code]
+      properties:
+        link_code: { type: string }
+        as_of_min: { type: integer, nullable: true }
+    Sk07RestoreData:
+      type: object
+      properties:
+        restored_tasks:
+          type: array
+          items: { type: string }
+        released_link_code: { type: string }
+
+    # ---------- 业务 SK-08 ----------
+    Sk08TaskIn:
+      type: object
+      required: [task_code, task_name, duration_min, link_code, demand_gbps]
+      properties:
+        task_code:     { type: string }
+        task_name:     { type: string }
+        duration_min:  { type: integer }
+        critical_min:  { type: integer, nullable: true }
+        link_code:     { type: string }
+        demand_gbps:   { type: number, format: float }
+        owner_role:    { type: string, nullable: true }
+    Sk08TaskData:
+      type: object
+      properties:
+        task_code:        { type: string }
+        demand_code:      { type: string }
+        triggered_action: { type: string, example: ACT-02 }
+
+    # ---------- 业务 SK-09 ----------
+    Sk09LinkIn:
+      type: object
+      required: [link_code, link_name, capacity_gbps, warning_gbps, oper_state, avg_repair_min]
+      properties:
+        link_code:        { type: string }
+        link_name:        { type: string }
+        capacity_gbps:    { type: number, format: float }
+        warning_gbps:     { type: number, format: float }
+        oper_state:       { type: string, description: up/down }
+        avg_repair_min:   { type: integer }
+        backup_link_code: { type: string, nullable: true }
+    Sk09LinkData:
+      type: object
+      properties:
+        link_code:        { type: string }
+        triggered_action: { type: string, example: ACT-02 }
+
+    # ---------- 业务 SK-10 ----------
+    Sk10DemandIn:
+      type: object
+      required: [task_code, valid_from_min, demand_gbps]
+      properties:
+        task_code:       { type: string }
+        valid_from_min:  { type: integer }
+        demand_gbps:     { type: number, format: float }
+    Sk10DemandData:
+      type: object
+      properties:
+        demand_code:      { type: string }
+        triggered_action: { type: string, example: ACT-02 }
+
+    # ---------- 查询 ----------
+    SnapshotData:
+      type: object
+      properties:
+        links:  { type: array, items: {} }
+        tasks:  { type: array, items: {} }
+        alarms: { type: array, items: {} }
+        plans:  { type: array, items: { $ref: '#/components/schemas/PlanItem' } }
+        events: { type: array, items: {} }
+    EventItem:
+      type: object
+      properties:
+        event_code: { type: string }
+        event_type: { type: string }
+        ref_type:   { type: string, nullable: true }
+        ref_code:   { type: string, nullable: true }
+        occur_min:  { type: integer }
+        summary:    { type: string, nullable: true }
+    ApprovalItem:
+      type: object
+      properties:
+        approval_code:   { type: string }
+        plan_code:       { type: string, nullable: true }
+        decision:        { type: string, nullable: true }
+        reason:          { type: string, nullable: true }
+        approver:        { type: string, nullable: true }
+        decision_source: { type: string, nullable: true }
+        decided_min:     { type: integer, nullable: true }
+
+    # ---------- 引擎 ----------
+    SceneStateData:
+      type: object
+      properties:
+        running:  { type: boolean }
+        now_min:  { type: integer }
+        wallclock:{ type: string }
+        links:    { type: array, items: {} }
+        tasks:    { type: array, items: {} }
+        plans:    { type: array, items: {} }
+        pending_approvals: { type: array, items: { $ref: '#/components/schemas/ApprovalItem' } }
+        events:   { type: array, items: { $ref: '#/components/schemas/EventItem' } }
+    SceneInputIn:
+      type: object
+      required: [category, payload]
+      properties:
+        category: { type: string, description: task/link/alarm/notice }
+        payload:  {}
+
+# =====================================================================
+# Paths
+# =====================================================================
+paths:
+
+  # ---------- 业务接口 ----------
+  /comm/switch:
+    post:
+      tags: [业务接口]
+      summary: SK-01 ACT-01 识别资源异常并自动切换
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk01SwitchIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk01SwitchData' }
+
+  /comm/occupancy:
+    post:
+      tags: [业务接口]
+      summary: SK-02 ACT-02 计算链路占用并前瞻预警
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk02OccupancyIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk02OccupancyData' }
+
+  /comm/plan:
+    post:
+      tags: [业务接口]
+      summary: SK-03 ACT-03 生成处置方案
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk03PlanIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk03PlanData' }
+
+  /comm/approve:
+    post:
+      tags: [业务接口]
+      summary: SK-04 ACT-04 人工审批决策
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk04ApproveIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk04ApproveData' }
+
+  /comm/repair:
+    post:
+      tags: [业务接口]
+      summary: SK-05 ACT-05 修理单回执登记
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk05RepairIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk05RepairData' }
+
+  /comm/alarm:
+    post:
+      tags: [业务接口]
+      summary: SK-06 事故注入（输入框·事故类）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk06AlarmIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk06AlarmData' }
+
+  /comm/restore:
+    post:
+      tags: [业务接口]
+      summary: SK-07 ACT-06 链路恢复与任务回迁
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk07RestoreIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk07RestoreData' }
+
+  /comm/task:
+    post:
+      tags: [业务接口]
+      summary: SK-08 添加任务（输入框·任务类）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk08TaskIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk08TaskData' }
+
+  /comm/link:
+    post:
+      tags: [业务接口]
+      summary: SK-09 添加链路（输入框·链路类）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk09LinkIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk09LinkData' }
+
+  /comm/demand:
+    post:
+      tags: [业务接口]
+      summary: SK-10 需求变更登记（输入框·提示类）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk10DemandIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk10DemandData' }
+
+  # ---------- 查询接口 ----------
+  /comm/snapshot:
+    get:
+      tags: [查询接口]
+      summary: 场景快照（链路/任务/告警/方案/事件）
+      parameters:
+        - in: query
+          name: as_of_min
+          schema: { type: integer }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SnapshotData' }
+
+  /comm/approvals:
+    get:
+      tags: [查询接口]
+      summary: 审批列表
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/ApprovalItem' }
+
+  /comm/events:
+    get:
+      tags: [查询接口]
+      summary: 事件流水
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: event_type
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/EventItem' }
+
+  # ---------- 引擎接口 ----------
+  /scene/state:
+    get:
+      tags: [引擎接口]
+      summary: 场景引擎当前状态
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SceneStateData' }
+
+  /scene/start:
+    post:
+      tags: [引擎接口]
+      summary: 启动场景（记录真实时刻为锚点，1:1 实时推演）
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                offset_min:
+                  type: integer
+                  default: 0
+                  minimum: 0
+                  description: 模拟初始已流逝分钟数
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SceneStateData' }
+
+  /scene/pause:
+    post:
+      tags: [引擎接口]
+      summary: 暂停引擎 tick 扫描（不影响业务时钟与 60s 倒计时）
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SceneStateData' }
+
+  /scene/resume:
+    post:
+      tags: [引擎接口]
+      summary: 恢复引擎 tick 扫描
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SceneStateData' }
+
+  /scene/reset:
+    post:
+      tags: [引擎接口]
+      summary: 清空除初始化外的业务数据，恢复默认三任务三链路+两条预置预订事件
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SceneStateData' }
+
+  /scene/decide:
+    post:
+      tags: [引擎接口]
+      summary: 引擎级决策（与 SK-04 同 schema）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sk04ApproveIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Sk04ApproveData' }
+
+  /scene/input:
+    post:
+      tags: [引擎接口]
+      summary: 输入框统一入口；task/link 直接转调 SK-08/SK-09；alarm/notice 由 Agent 意图识别后分发
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SceneInputIn' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+
+  /scene/ws:
+    get:
+      tags: [引擎接口]
+      summary: 场景事件 WebSocket（推送 state/alert/modal/modal_refresh/modal_notice/toast/event）
+      description: |
+        推送消息格式：`{type: "state|alert|modal|modal_refresh|modal_notice|toast|event", data: {...}}`
+      responses:
+        '101':
+          description: Switching Protocols (WebSocket upgrade)
+
+tags:
+  - name: 业务接口
+    description: SK-01 ~ SK-10
+  - name: 查询接口
+    description: snapshot / approvals / events
+  - name: 引擎接口
+    description: scene 状态/控制/输入/WS
