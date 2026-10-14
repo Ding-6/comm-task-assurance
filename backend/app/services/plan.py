@@ -115,6 +115,35 @@ def generate_plans(alarm_link_code: str, as_of_min: Optional[int] = None,
     PlanRepo.insert(repair_plan)
     plans.append(repair_plan)
 
+    # 修复（major 4）：当故障链路自身没有 backup_link_code 时，
+    # 用其上"被切过来"的任务原链路（note 含 "由 X 切换而来"）的 backup_link_code 作为目标。
+    # §1.6 场景：L-2H 无 backup，但 L-1H 有 backup=L-3H；T-A 由 L-1H 切到 L-2H 触发容量告警，
+    # REROUTE 必须能迁回 L-3H。
+    if not backup_code:
+        derived_targets: List[str] = []
+        for b in latest.values():
+            note = b.note or ""
+            if "由" in note and "切换而来" in note:
+                # note 形如 "L-1H 批准转备用，由 20 执行" 或 "L-1H 切换而来"
+                import re as _re
+                m = _re.search(r"由\s*(\S+?)\s*(?:批准|切换|执行|故障|恢复)", note)
+                if not m:
+                    # 退而求其次：取 "由 X" 后面第一个非空 token
+                    m = _re.search(r"由\s+(\S+)", note)
+                if m:
+                    orig = m.group(1)
+                    if orig and orig not in (None, alarm_link_code):
+                        derived_targets.append(orig)
+        # 拿原链路的 backup_link_code 作为目标
+        derived_backup = None
+        for orig in derived_targets:
+            orig_link = LinkRepo.get(orig)
+            if orig_link and orig_link.backup_link_code:
+                derived_backup = orig_link.backup_link_code
+                break
+        if derived_backup:
+            backup_code = derived_backup
+
     if backup_code:
         reroute_code = _alloc_plan_code(alarm_link_code, "reroute", seq + 1)
         predicted_after = _compute_predicted_load_after(backup_code, migrated_demands, now)
