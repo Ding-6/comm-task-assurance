@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.common.exceptions import BizException
 from app.common.ws import get_hub
@@ -135,6 +135,38 @@ def precheck_add_task(payload: PrecheckIn) -> ApiResponse:
 @router.get("/evidence/report", response_model=ApiResponse)
 def get_evidence() -> ApiResponse:
     return ApiResponse(data=get_evidence_report())
+
+
+# ============================================================
+# SK-12 调整前瞻窗口 → POST /api/comm/lookahead
+# 联调发现 §7.1 表里有但路由缺失，补上
+# ============================================================
+
+class LookaheadIn(BaseModel):
+    target_type: str = Field(..., description="link | task")
+    target_code: str
+    lookahead_min: int = Field(..., ge=1, le=240)
+
+
+@router.post("/lookahead", response_model=ApiResponse)
+def set_lookahead(payload: LookaheadIn) -> ApiResponse:
+    from app.db.repo import LinkRepo, TaskRepo
+    if payload.target_type == "link":
+        link = LinkRepo.get(payload.target_code)
+        if link is None:
+            return ApiResponse(code=400, message=f"链路不存在: {payload.target_code}")
+        LinkRepo.update_lookahead(payload.target_code, payload.lookahead_min)
+    elif payload.target_type == "task":
+        task = TaskRepo.get(payload.target_code)
+        if task is None:
+            return ApiResponse(code=400, message=f"任务不存在: {payload.target_code}")
+        TaskRepo.update_lookahead(payload.target_code, payload.lookahead_min)
+    else:
+        return ApiResponse(code=400, message=f"target_type 必须为 link/task: {payload.target_type}")
+    # 立即触发一次重算
+    from app.services.occupancy import recalc_all
+    recalc_all()
+    return ApiResponse(data={"target_type": payload.target_type, "target_code": payload.target_code, "lookahead_min": payload.lookahead_min})
 
 
 # ============================================================

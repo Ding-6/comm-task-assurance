@@ -66,6 +66,13 @@ class TaskRepo:
         )
 
     @staticmethod
+    def update_lookahead(task_code: str, lookahead_min: int) -> None:
+        execute(
+            f"UPDATE {TaskRepo.TABLE} SET lookahead_min=%s WHERE task_code=%s",
+            (lookahead_min, task_code),
+        )
+
+    @staticmethod
     def delete_all() -> None:
         execute(f"DELETE FROM {TaskRepo.TABLE}")
 
@@ -112,6 +119,13 @@ class LinkRepo:
             f"UPDATE {LinkRepo.TABLE} SET current_load_gbps=%s, future_load_gbps=%s, "
             f"warn_status=%s WHERE link_code=%s",
             (current, future, warn_status, link_code),
+        )
+
+    @staticmethod
+    def update_lookahead(link_code: str, lookahead_min: int) -> None:
+        execute(
+            f"UPDATE {LinkRepo.TABLE} SET lookahead_min=%s WHERE link_code=%s",
+            (lookahead_min, link_code),
         )
 
     @staticmethod
@@ -362,6 +376,14 @@ class PlanRepo:
         return _rows(CommPlanRow, query(
             f"SELECT * FROM {PlanRepo.TABLE} "
             f"WHERE alarm_code=%s AND status='待审批'",
+            (alarm_code,),
+        ))
+
+    @staticmethod
+    def list_by_alarm(alarm_code: str) -> List[CommPlanRow]:
+        """列出某告警下所有方案（含历史状态），用于决定是否重复生成。"""
+        return _rows(CommPlanRow, query(
+            f"SELECT * FROM {PlanRepo.TABLE} WHERE alarm_code=%s ORDER BY generated_min",
             (alarm_code,),
         ))
 

@@ -41,6 +41,9 @@ export const generatePlan = (payload) => http.post('/comm/plan', payload);
 /** SK-04 ACT-04 人工审批决策 */
 export const decideApproval = (payload) => http.post('/comm/approve', payload);
 
+/** SK-04b 批量拒绝告警下所有待审批方案（修复 round2-minor-E） */
+export const rejectAllPlans = (payload) => http.post('/comm/plans/reject-all', payload);
+
 /** SK-06 ACT-05 修理回执 / 修理完成 */
 export const receiveRepair = (payload) => http.post('/comm/repair', payload);
 
