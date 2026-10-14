@@ -111,7 +111,10 @@ def _dispatch_booking(ev: SceneEventRow) -> None:
             occur_min=now_min, summary=f"{alarm.alarm_code} link_down @ {link.link_code}",
         ))
         handle_link_down(alarm_link_code=link.link_code, as_of_min=ev.occur_min)
-        generate_plans(alarm_link_code=link.link_code, as_of_min=ev.occur_min)
+        # 修复（major 1）：link_down 仅发告警 notice，不再立刻 generate_plans。
+        # §R1 明确：link_down 只告警；ACT-03（生成方案）必须等 T+20 容量告警。
+        # 旧逻辑在 T+15 立刻生成 REROUTE，会在容量告警前抢跑、把 T-A 切到 L-3H。
+        # handle_link_down 内已触发 recalc_all，容量告警会自然生成方案。
 
     elif ev.ref_type == "demand" and ev.ref_code:
         code = ev.ref_code
@@ -440,11 +443,13 @@ def _dispatch_parsed(parsed: Dict[str, Any]) -> Dict[str, Any]:
             occur_min=now, summary=f"{alarm.alarm_code} {alarm.alarm_type} @ {link_code}",
         ))
         switch_result = handle_link_down(alarm_link_code=link_code)
-        plans = generate_plans(alarm_link_code=link_code)
+        # 修复（major 1）：HTTP 入口 link_down 也不立刻 generate_plans。
+        # 返回当前已存在的待审批方案（可能为 0），由后续 ACT-03 触发。
+        from app.db.repo import PlanRepo as _PR
         return {
             "alarm_code": alarm.alarm_code,
             "switch": switch_result,
-            "plans": [p["plan_code"] for p in plans.get("plans", [])],
+            "plans": [p.plan_code for p in _PR.list_pending() if p.alarm_code == alarm.alarm_code],
         }
 
     if sub == "demand_change":
