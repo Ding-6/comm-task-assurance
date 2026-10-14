@@ -266,7 +266,11 @@ def reset_default_scene() -> None:
             TaskLinkBindingRow(task_code="T-B", link_code="L-2H", assigned_min=0, note="场景初始归属"),
             TaskLinkBindingRow(task_code="T-C", link_code="L-2H", assigned_min=0, note="场景初始归属"),
         ]:
-            TaskLinkRepo.insert(b)
+            # 修复 bug1：upsert 取代 insert
+            TaskLinkRepo.upsert(
+                task_code=b.task_code, link_code=b.link_code,
+                assigned_min=b.assigned_min, note=b.note,
+            )
 
         for e in [
             SceneEventRow(event_code="EVT-0001", event_type="task_booked",
@@ -515,10 +519,11 @@ def add_task(
         valid_to_min=None,
     ))
     if link_code:
-        TaskLinkRepo.insert(TaskLinkBindingRow(
+        # 修复 bug1：upsert 取代 insert
+        TaskLinkRepo.upsert(
             task_code=task_code, link_code=link_code,
             assigned_min=get_clock().now_min(), note="任务登记初始归属",
-        ))
+        )
     from app.services.occupancy import recalc_all
     recalc_all(as_of_min=get_clock().now_min())
     return {"task_code": task_code, "demand_code": demand_code, "triggered_action": "ACT-02"}

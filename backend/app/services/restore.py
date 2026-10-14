@@ -81,10 +81,11 @@ def handle_link_restored(link_code: str, as_of_min: Optional[int] = None) -> Dic
         if current_load + demand > capacity:
             skipped.append({"task_code": cand.task_code, "reason": f"超容量({current_load + demand}>{capacity})"})
             continue
-        TaskLinkRepo.insert(TaskLinkBindingRow(
+        # 修复 bug1：upsert 取代 insert
+        TaskLinkRepo.upsert(
             task_code=cand.task_code, link_code=link_code, assigned_min=now,
             note=f"{link_code} 修复完成，由原承载链路回迁",
-        ))
+        )
         TaskRepo.update_current_link(cand.task_code, link_code)
         restored.append(cand.task_code)
         current_load += demand

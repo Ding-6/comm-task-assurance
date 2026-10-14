@@ -1,12 +1,18 @@
 <template>
   <Teleport to="body">
-    <div v-if="approval.open" class="mask">
-      <article class="modal" role="dialog" aria-modal="true">
+    <div
+      v-if="approval.open"
+      class="mask"
+      role="dialog"
+      aria-modal="true"
+      @click.self="$emit('close')"
+    >
+      <article class="modal">
         <!-- 标题区 -->
         <header class="mh">
           <span class="pill over">✕ 容量超限</span>
           <h3>处置方案审批 · {{ approval.alarm || 'L-1H 故障引发 L-2H 前瞻超限' }}</h3>
-          <span class="muted right">审批人 ROLE-APPROVER · 场景时钟照常推进</span>
+          <button type="button" class="x" aria-label="关闭" @click="$emit('close')">×</button>
         </header>
 
         <div class="mb-body">
@@ -33,11 +39,10 @@
 
           <!-- 方案 -->
           <div class="plans">
-            <div v-for="(p, i) in approval.plans" :key="p.code" class="plan" :class="planCls(p, i)">
+            <div v-for="p in approval.plans" :key="p.code" class="plan" :class="planCls(p)">
               <h4>
                 {{ p.name }}
                 <span v-if="p.voided" class="pill over">✕ 已作废</span>
-                <span v-else-if="p.status === '唯一推荐'" class="pill idle">待审批</span>
                 <span v-else class="pill idle">待审批</span>
               </h4>
               <div class="code mono">{{ p.code }}</div>
@@ -51,13 +56,18 @@
                 <dt>处置后</dt><dd>{{ p.after || '修好后 T-A 回迁 L-1H' }}</dd>
               </dl>
               <div class="rec">{{ p.rec }}</div>
-              <div v-if="p.isDefault" class="defnote">◆ 60 秒未决策将自动执行此方案（approver = SYSTEM，decision_source = 超时自动）</div>
+              <!-- 修复 bug5：两按钮同一水平线（justify-content: space-between 也会让一个按钮靠左，这里用 grid 强制并列） -->
               <div class="acts">
-                <button class="btn" :disabled="p.voided" @click="decide(p, 'approve')">批准 {{ p.type }}</button>
-                <button v-if="p.isDefault" class="btn pri" :disabled="p.voided" @click="decide(p, 'approve')">批准 REROUTE</button>
+                <button class="btn" :disabled="p.voided || busy" @click="decide(p, 'reject')">拒绝 {{ p.type }}</button>
+                <button class="btn pri" :disabled="p.voided || busy" @click="decide(p, 'approve')">批准 {{ p.type }}</button>
               </div>
               <span v-if="p.isDefault" class="badge">保守默认</span>
             </div>
+          </div>
+
+          <!-- 修复 bug7：默认方案说明移到审批理由上方；bug6：去掉括号元信息，给出"将自动执行 XXX 方案"具体描述 -->
+          <div v-if="defaultNote" class="auto-note">
+            <b>◆ 自动执行说明</b>：{{ defaultNote }}
           </div>
 
           <div class="reason">
@@ -68,8 +78,8 @@
 
         <footer class="mf">
           <span class="muted">拒绝 = 维持现状，持续预警监测</span>
-          <button class="btn danger" style="margin-left:auto" @click="$emit('reject-all')">拒绝全部方案</button>
-          <button class="btn ghost" @click="$emit('close')">关闭</button>
+          <button class="btn danger" :disabled="busy" @click="$emit('reject-all')">拒绝全部方案</button>
+          <button class="btn ghost" :disabled="busy" @click="$emit('close')">关闭</button>
         </footer>
       </article>
     </div>
@@ -77,7 +87,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { decideApproval } from '../utils/api';
 
@@ -86,6 +96,7 @@ const emit = defineEmits(['decide', 'close', 'reject-all']);
 
 const reason = ref('');
 const remain = ref(60);
+const busy = ref(false);
 let timer = null;
 
 function start() {
@@ -93,28 +104,48 @@ function start() {
   remain.value = props.approval.countdown ?? 60;
   timer = setInterval(() => {
     if (remain.value > 0) remain.value -= 1;
-    else { clearInterval(timer); timer = null; /* 归零：自动执行 */ autoExecute(); }
+    else { clearInterval(timer); timer = null; autoExecute(); }
   }, 1000);
 }
 function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+// 修复 bug11：监听 Esc 关闭 + open 变化 stop/start
+function onKey(e) { if (e.key === 'Escape' && props.approval.open) emit('close'); }
+onMounted(() => window.addEventListener('keydown', onKey));
+onBeforeUnmount(() => { stop(); window.removeEventListener('keydown', onKey); });
 
 watch(() => props.approval.open, (v) => { v ? start() : stop(); });
 watch(() => props.approval.countdown, (v) => {
   // 外部刷新方案时倒计时不重置（设计稿硬约束）
   if (v != null && remain.value <= 0) remain.value = v;
 });
-onBeforeUnmount(stop);
 
-function planCls(p, i) {
+function planCls(p) {
   if (p.voided) return 'void';
   if (p.isDefault) return 'def';
   return '';
 }
 
+// 修复 bug6：把"60 秒未决策将自动执行..."从元信息括号里改成具体方案描述
+const defaultNote = computed(() => {
+  const def = (props.approval.plans || []).find((x) => x.isDefault);
+  if (!def) return null;
+  // 友好描述：如"将自动执行 转备用 L-3H 方案"
+  if (def.type === 'REROUTE' || def.type === 'reroute') {
+    const tgt = def.target || def.targetLinkCode || '备用链路';
+    return `60 秒未决策将自动执行 ${def.name || 'REROUTE'} 方案：把 ${def.fault || '故障链路'} 上的任务迁至 ${tgt}，立即解除容量风险。`;
+  }
+  if (def.type === 'REPAIR' || def.type === 'repair') {
+    return `60 秒未决策将自动执行 ${def.name || 'REPAIR'} 方案：保持现状等修理（预计 ${def.estRepair || def.estRepairMin || ''} 分钟修复）。`;
+  }
+  return `60 秒未决策将自动执行 ${def.name || '默认'} 方案。`;
+});
+
 async function decide(p, kind) {
+  if (busy.value) return;
+  busy.value = true;
   try {
-    // 修复（major 9）：后端 decision 只接受 '批准' / '拒绝'；
-    // 旧逻辑发 'approve' / 'reject' → 后端 else 分支一律置 '拒绝'，审计错位
+    // 修复（major 9）：后端 decision 只接受 '批准' / '拒绝'
     const decisionCn = kind === 'approve' ? '批准' : '拒绝';
     await decideApproval({
       plan_code: p.code,
@@ -126,15 +157,21 @@ async function decide(p, kind) {
     ElMessage.success(`已${decisionCn}：${p.code}`);
     emit('decide', { plan: p, kind, reason: reason.value });
     stop();
-  } catch {/* http.js 已 ElMessage */}
+  } catch (e) {
+    // 修复 bug4：把后端 BizException 反馈给用户（http.js 已经 ElMessage，这里再加一条更具体）
+    const msg = e?.response?.data?.message || e?.message || '审批失败';
+    ElMessage.error(`审批失败：${msg}`);
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function autoExecute() {
   const def = (props.approval.plans || []).find((x) => x.isDefault);
   if (!def) return;
+  if (busy.value) return;
+  busy.value = true;
   try {
-    // 修复（major 9）：后端 approver / decision_source 走 'SYSTEM' / '超时自动'
-    // 不再发 'source: SYSTEM_TIMEOUT'（后端忽略，审计显示成"人工"）
     await decideApproval({
       plan_code: def.code,
       decision: '批准',
@@ -144,7 +181,12 @@ async function autoExecute() {
     });
     ElMessage.warning(`超时自动执行：${def.code}`);
     emit('decide', { plan: def, kind: 'approve', reason: '超时自动' });
-  } catch {/* */}
+  } catch (e) {
+    // 即使超时自动失败也要让前端能关闭弹窗
+    emit('decide', { plan: def, kind: 'timeout_failed', reason: '超时自动' });
+  } finally {
+    busy.value = false;
+  }
 }
 </script>
 
@@ -164,9 +206,13 @@ async function autoExecute() {
   padding: 16px 20px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;
 }
-.mh h3 { margin: 0; font-size: 16px; }
-.mh .muted { font-size: 12px; }
-.mh .right { margin-left: auto; }
+.mh h3 { margin: 0; font-size: 16px; flex: 1 1 auto; }
+.mh .x {
+  width: 28px; height: 28px; border: 0; background: transparent;
+  font-size: 22px; line-height: 1; cursor: pointer; color: var(--sub);
+  border-radius: 4px;
+}
+.mh .x:hover { background: var(--chip); color: var(--text); }
 .mb-body { padding: 16px 20px; }
 
 .ctx { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
@@ -211,13 +257,28 @@ async function autoExecute() {
   font-size: 12px; color: var(--text);
   background: var(--chip); border-radius: 6px; padding: 8px 10px; line-height: 1.6;
 }
-.plan .acts { display: flex; gap: 8px; margin-top: 12px; }
+/* 修复 bug5：两个按钮用 grid 强制同一行 */
+.plan .acts {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  margin-top: 12px;
+}
 .badge {
   position: absolute; top: 12px; right: 12px;
   font-size: 11px; padding: 2px 8px; border-radius: 10px;
   background: var(--backup); color: #fff; font-weight: 700;
 }
-.defnote { font-size: 12px; color: var(--backup-fg); margin-top: 8px; }
+
+/* 修复 bug7：默认方案说明，移到审批理由上面 */
+.auto-note {
+  margin-top: 12px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border: 1px solid var(--warn-bd);
+  border-radius: 6px;
+}
+.auto-note b { color: var(--text); margin-right: 4px; }
 
 .btn {
   font: inherit; font-size: 13px; padding: 7px 14px;

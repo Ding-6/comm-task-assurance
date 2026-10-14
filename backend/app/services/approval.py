@@ -235,10 +235,11 @@ def _execute_reroute(plan, now: int) -> None:
     for b in rows:
         latest.setdefault(b.task_code, b)
     for b in latest.values():
-        TaskLinkRepo.insert(TaskLinkBindingRow(
+        # 修复 bug1：upsert 取代 insert，避免同分钟重复切换撞唯一键
+        TaskLinkRepo.upsert(
             task_code=b.task_code, link_code=target, assigned_min=now,
             note=f"{fault} 批准转备用，由 {now} 执行",
-        ))
+        )
         TaskRepo.update_current_link(b.task_code, target)
 
 

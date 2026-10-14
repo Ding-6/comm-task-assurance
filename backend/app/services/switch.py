@@ -64,10 +64,11 @@ def handle_link_down(alarm_link_code: str, as_of_min: Optional[int] = None) -> D
 
     for b in bindings:
         if target_code:
-            TaskLinkRepo.insert(TaskLinkBindingRow(
+            # 修复 bug1：用 upsert 取代 insert，避免 (task_code, assigned_min) 唯一键冲突
+            TaskLinkRepo.upsert(
                 task_code=b.task_code, link_code=target_code,
                 assigned_min=now, note=f"由 {alarm_link_code} 切换而来",
-            ))
+            )
             TaskRepo.update_current_link(b.task_code, target_code)
 
     seq = RepairRepo.next_seq(alarm_link_code)

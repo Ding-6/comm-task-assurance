@@ -261,6 +261,18 @@ class TaskLinkRepo:
         ))
 
     @staticmethod
+    def upsert(task_code: str, link_code: str, assigned_min: int, note: str) -> int:
+        """同 (task_code, assigned_min) 已存在则更新 link_code + note，否则 INSERT。
+        修复 bug1：原 insert 在重试/重复切换时撞 uk_task_min 唯一键；现在原子 upsert。
+        """
+        return execute(
+            f"INSERT INTO {TaskLinkRepo.TABLE} (task_code, link_code, assigned_min, note) "
+            f"VALUES (%s, %s, %s, %s) "
+            f"ON DUPLICATE KEY UPDATE link_code=VALUES(link_code), note=VALUES(note)",
+            (task_code, link_code, assigned_min, note),
+        )
+
+    @staticmethod
     def list_by_link(link_code: str) -> List[TaskLinkBindingRow]:
         return _rows(TaskLinkBindingRow, query(
             f"SELECT * FROM {TaskLinkRepo.TABLE} WHERE link_code=%s "

@@ -99,27 +99,31 @@ async function submit() {
 </script>
 
 <style scoped>
-.mask { position: fixed; inset: 0; background: rgba(3,8,16,.66); display: flex; align-items: center; justify-content: center; z-index: 110; }
-.fm { width: 520px; max-width: 96vw; background: #10213a; border: 1px solid var(--border); border-radius: 12px; }
-.mh { padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 700; display: flex; gap: 10px; align-items: baseline; }
+/* 修复 bug8：原样式 background: #10213a 是深色，与全局浅色主题冲突，label/input 不可见
+   现统一用浅色卡片 + chip 输入框底 + sub 文字（对比度足够） */
+.mask { position: fixed; inset: 0; background: rgba(30,40,60,.40); display: flex; align-items: center; justify-content: center; z-index: 110; }
+.fm { width: 520px; max-width: 96vw; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 20px 60px rgba(20,20,30,.18); }
+.mh { padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 700; color: var(--text); display: flex; gap: 10px; align-items: baseline; }
 .mh .sub { font-weight: 400; color: var(--sub); font-size: 12px; }
 .mb { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .mf { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
-.fd label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 4px; }
+.fd label { display: block; font-size: 12.5px; color: var(--text); font-weight: 500; margin-bottom: 4px; }
 .fd label em { color: var(--over); font-style: normal; margin-left: 2px; }
-.fd .in { display: flex; align-items: center; background: var(--chip); border: 1px solid var(--border); border-radius: 6px; padding: 0 10px; height: 34px; font-size: 13px; }
-.fd .in input { flex: 1; background: transparent; border: 0; color: var(--text); font: inherit; outline: none; }
+.fd .in { display: flex; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 0 10px; height: 34px; font-size: 13px; }
+.fd .in input { flex: 1; background: transparent; border: 0; color: var(--text); font: inherit; outline: none; caret-color: var(--accent); }
+.fd .in input::placeholder { color: var(--muted); }
 .fd .in .u { margin-left: auto; color: var(--muted); font-size: 12px; }
 .fd .in.err { border-color: var(--over); }
-.fd .msg { font-size: 11.5px; color: #fca5a5; margin-top: 4px; }
-.fd .help { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+.fd .msg { font-size: 11.5px; color: var(--over); margin-top: 4px; }
+.fd .help { font-size: 11.5px; color: var(--sub); margin-top: 4px; }
 .seg { display: flex; gap: 6px; }
-.seg span { flex: 1; text-align: center; padding: 7px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: var(--chip); cursor: pointer; }
-.seg span.on { border-color: var(--accent); background: rgba(59,130,246,.18); }
+.seg span { flex: 1; text-align: center; padding: 7px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: #fff; color: var(--text); cursor: pointer; }
+.seg span.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .parse { font-size: 12px; padding: 8px 10px; border-radius: 6px; }
-.parse.warn { background: rgba(234,179,8,.12); border: 1px solid #854d0e; color: #fde68a; }
-.parse.ok { background: rgba(34,197,94,.10); border: 1px solid #166534; color: #bbf7d0; }
+.parse.warn { background: var(--warn-bg); border: 1px solid var(--warn-bd); color: var(--warn-fg); }
+.parse.ok { background: var(--ok-bg); border: 1px solid var(--ok-bd); color: var(--ok-fg); }
 .btn { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
 .btn.pri { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:hover { border-color: var(--accent); }
 .btn[disabled] { opacity: .4; cursor: not-allowed; }
 </style>

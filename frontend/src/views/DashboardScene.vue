@@ -25,7 +25,7 @@
     </header>
 
     <!-- ====== 顶部提示条 ====== -->
-    <ToastBar :toasts="scene.toasts" />
+    <ToastBar :toasts="mergedToasts" @dismiss="onToastDismiss" />
 
     <!-- ====== 主区 ====== -->
     <main class="main">
@@ -205,11 +205,49 @@ async function reset() {
 }
 
 const wsRef = ref(null);
+// 修复 bug2/3/9/10：实时累积 ws 推送的 toast / notice（不再走场景静态数据）
+const liveToasts = ref([]); // {id, lv, ic, txt, src}
+let _toastIdSeq = 0;
+function pushToast({ lv = 'info', ic = '', txt = '', src = '' }) {
+  const id = ++_toastIdSeq;
+  liveToasts.value = [...liveToasts.value, { id, lv, ic, txt, src }];
+}
+const mergedToasts = computed(() => {
+  // 静态场景的 toasts（在脚本中作为占位） + 实时 ws 推送
+  const staticOnes = (scene.value.toasts || []).map((t, i) => ({
+    id: `static-${currentStep.value}-${i}`,
+    lv: t.lv || 'info', ic: t.ic || '', txt: t.txt || '', src: t.src || '',
+  }));
+  return [...staticOnes, ...liveToasts.value];
+});
+function onToastDismiss(t) {
+  if (t.id && String(t.id).startsWith('static-')) return; // 静态不删
+  liveToasts.value = liveToasts.value.filter((x) => x.id !== t.id);
+}
 onMounted(() => {
   wsRef.value = createSceneSocket({
     onOpen: () => console.debug('[ws] connected'),
     onMessage: (msg) => {
-      if (msg?.type === 'snapshot' && msg.step) jumpTo(msg.step);
+      if (!msg) return;
+      if (msg.type === 'snapshot' && msg.step) jumpTo(msg.step);
+      // 修复 bug2/3/9/10：把后端 toast/modal_notice/alert 累积为顶部提示
+      else if (msg.type === 'toast' && msg.data) {
+        const d = msg.data;
+        pushToast({ lv: d.level || 'info', ic: '', txt: d.message || '' });
+      } else if (msg.type === 'modal_notice' && msg.data) {
+        const d = msg.data;
+        pushToast({ lv: d.level || 'info', ic: d.title || 'ⓘ', txt: d.message || '' });
+      } else if (msg.type === 'alert' && msg.data) {
+        const d = msg.data;
+        pushToast({ lv: d.level || 'warn', ic: '!', txt: d.message || '' });
+      } else if (msg.type === 'state' && msg.data) {
+        // state 推送里也常带一个 listOfToasts（演示方）；兼容
+        if (Array.isArray(msg.data.toasts)) {
+          for (const t of msg.data.toasts) pushToast(t);
+        }
+      } else if (msg.type === 'engine_error' && msg.data) {
+        pushToast({ lv: 'over', ic: '✕', txt: `引擎异常：${msg.data.error || ''}` });
+      }
     },
   });
 });
@@ -220,6 +258,7 @@ onBeforeUnmount(() => wsRef.value?.close?.());
 .ds {
   display: flex; flex-direction: column;
   min-height: 100%;
+  width: 100%;
   background: var(--page); color: var(--text);
 }
 
