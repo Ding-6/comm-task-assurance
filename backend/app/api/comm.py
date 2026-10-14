@@ -196,11 +196,23 @@ def inject_alarm(payload: AlarmInjectIn) -> ApiResponse:
         event_type="alarm_injected", ref_type="alarm", ref_code=code,
         occur_min=now, summary=f"{code} {payload.alarm_type} @ {payload.link_code}",
     ))
-    return ApiResponse(data=ResourceAlarmRow(
+    # 修复（联调）：事故注入应立即触发 ACT-01 切换（共享优先）；
+    # 不再等预订事件的 tick 调度（事故是"现在"不是"未来"）。
+    switch_result = None
+    if payload.alarm_type == "link_down":
+        from app.services.switch import handle_link_down
+        try:
+            switch_result = handle_link_down(alarm_link_code=payload.link_code, as_of_min=now)
+        except Exception as e:
+            switch_result = {"error": str(e)}
+    out = ResourceAlarmRow(
         alarm_code=code, link_code=payload.link_code,
         alarm_type=payload.alarm_type, native_severity=payload.native_severity,
         event_min=now, predicted_min=payload.predicted_min,
-    ).to_dict())
+    ).to_dict()
+    if switch_result is not None:
+        out["switch"] = switch_result
+    return ApiResponse(data=out)
 
 
 # ============================================================
