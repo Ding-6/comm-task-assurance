@@ -395,7 +395,7 @@ bad = re.findall(r"execute\(f[\"'].*%s", src)  # 仅查 f-string 拼接 %s
 check("app/db/repo.py 无 f-string 拼 SQL", len(bad) == 0, f"潜在问题 {len(bad)} 个")
 
 # .owl 类 ↔ 数据库表
-import yaml as _y
+# 修复（minor 13）：去掉未使用的 yaml 导入 + 表检查改走 TMA_MYSQL_* 配置
 with open(os.path.join(os.path.dirname(__file__), "..", "depoly", "通信任务保障本体_v4.1.owl"), encoding="utf-8") as f:
     owl = f.read()
 owl_classes = re.findall(r'owl:Class rdf:about="#(\w+)"', owl)
@@ -409,13 +409,9 @@ expected = {
 matched = sum(1 for k in expected if k in owl_classes)
 check("9 张表与 .owl 8+1 类一一对应", matched == 9, f"对应={matched}/9")
 
-# 9 张表实际存在
-import pymysql
-c = pymysql.connect(host="127.0.0.1", port=3306, user="root", password="123456", database="zb_db2")
-with c.cursor() as cur:
-    cur.execute("SHOW TABLES")
-    rows = [r[0] for r in cur.fetchall()]
-c.close()
+# 9 张表实际存在（走配置而不是硬编码 root/123456/zb_db2）
+from app.db import query
+rows = [next(iter(r.values())) for r in query("SHOW TABLES")]
 check("9 张表全部存在", all(t in rows for t in expected.values()), f"实际={rows}")
 
 # ============================================================
