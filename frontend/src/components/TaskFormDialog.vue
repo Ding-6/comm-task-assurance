@@ -81,7 +81,16 @@ async function submit() {
   if (!/^T-[A-Z0-9]+$/i.test(form.code)) errors.value.code = '编码格式应为 T-XXX';
   if (Object.keys(errors.value).length) return;
   try {
-    await addTask({ ...form });
+    // 修复（major 10）：内部字段映射到后端 TaskAddIn schema
+    // code/name/link/gbps → task_code/task_name/link_code/demand_gbps
+    await addTask({
+      task_code: form.code,
+      task_name: form.name,
+      duration_min: form.duration_min,
+      link_code: form.link,
+      demand_gbps: form.gbps,
+      critical_min: form.critical_min,
+    });
     ElMessage.success(`已登记任务：${form.code}`);
     emit('submit', form);
     emit('update:modelValue', false);

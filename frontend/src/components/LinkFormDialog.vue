@@ -72,10 +72,19 @@ const canSubmit = computed(() => form.code && form.name && form.capacity && form
 async function submit() {
   errors.value = {};
   if (!/^L-[\w-]+$/i.test(form.code)) errors.value.code = '链路编码格式应为 L-XXX（link_code 为主键）';
-  if (form.warning >= form.capacity) errors.value.code = '预警线必须小于容量';
+  if (form.warning >= form.capacity) errors.value.warning = '预警线必须小于容量';
   if (Object.keys(errors.value).length) return;
   try {
-    await addLink({ ...form });
+    // 修复（major 10）：内部字段映射到后端 LinkAddIn schema
+    await addLink({
+      link_code: form.code,
+      link_name: form.name,
+      capacity_gbps: form.capacity,
+      warning_gbps: form.warning,
+      oper_state: form.status,
+      avg_repair_min: form.repair_min,
+      backup_link_code: form.backup || null,
+    });
     ElMessage.success(`已登记链路：${form.code}`);
     emit('submit', form);
     emit('update:modelValue', false);
