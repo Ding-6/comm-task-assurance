@@ -113,8 +113,17 @@ function planCls(p, i) {
 
 async function decide(p, kind) {
   try {
-    await decideApproval({ plan_code: p.code, decision: kind, reason: reason.value });
-    ElMessage.success(`已${kind === 'approve' ? '批准' : '拒绝'}：${p.code}`);
+    // 修复（major 9）：后端 decision 只接受 '批准' / '拒绝'；
+    // 旧逻辑发 'approve' / 'reject' → 后端 else 分支一律置 '拒绝'，审计错位
+    const decisionCn = kind === 'approve' ? '批准' : '拒绝';
+    await decideApproval({
+      plan_code: p.code,
+      decision: decisionCn,
+      reason: reason.value,
+      approver: 'ROLE-APPROVER',
+      decision_source: '人工',
+    });
+    ElMessage.success(`已${decisionCn}：${p.code}`);
     emit('decide', { plan: p, kind, reason: reason.value });
     stop();
   } catch {/* http.js 已 ElMessage */}
@@ -124,9 +133,17 @@ async function autoExecute() {
   const def = (props.approval.plans || []).find((x) => x.isDefault);
   if (!def) return;
   try {
-    await decideApproval({ plan_code: def.code, decision: 'approve', reason: '60 秒未决策，自动执行保守默认方案', source: 'SYSTEM_TIMEOUT' });
+    // 修复（major 9）：后端 approver / decision_source 走 'SYSTEM' / '超时自动'
+    // 不再发 'source: SYSTEM_TIMEOUT'（后端忽略，审计显示成"人工"）
+    await decideApproval({
+      plan_code: def.code,
+      decision: '批准',
+      reason: '60 秒未决策，自动执行保守默认方案',
+      approver: 'SYSTEM',
+      decision_source: '超时自动',
+    });
     ElMessage.warning(`超时自动执行：${def.code}`);
-    emit('decide', { plan: def, kind: 'approve', reason: '超时自动', source: 'SYSTEM_TIMEOUT' });
+    emit('decide', { plan: def, kind: 'approve', reason: '超时自动' });
   } catch {/* */}
 }
 </script>

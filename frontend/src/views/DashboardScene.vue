@@ -112,7 +112,7 @@ import InputPanel from '../components/InputPanel.vue';
 import TaskFormDialog from '../components/TaskFormDialog.vue';
 import LinkFormDialog from '../components/LinkFormDialog.vue';
 import { getScene, STEP_KEYS } from '../data/scenes';
-import { resetScene } from '../utils/api';
+import { resetScene, decideApproval } from '../utils/api';
 import { createSceneSocket } from '../utils/ws';
 import { formatClock, plusMin, rel } from '../utils/time';
 import { useRouter } from 'vue-router';
@@ -170,7 +170,22 @@ function onDecide({ plan }) {
   ElMessage.success(`已决策：${plan.code}`);
   if (plan.type === 'REROUTE') jumpTo('m21');
 }
-function onRejectAll() { ElMessage.warning('已拒绝全部方案'); }
+async function onRejectAll() {
+  // 修复（major 9）：拒绝全部要走后端真实接口，否则审计与 DB 不一致
+  const plans = scene.approval.plans || [];
+  for (const p of plans) {
+    try {
+      await decideApproval({
+        plan_code: p.code,
+        decision: '拒绝',
+        reason: '批量拒绝全部方案',
+        approver: 'ROLE-APPROVER',
+        decision_source: '人工',
+      });
+    } catch {/* http.js 已 ElMessage */}
+  }
+  ElMessage.warning('已拒绝全部方案');
+}
 
 function goReport() { router.push('/report'); }
 async function reset() {
