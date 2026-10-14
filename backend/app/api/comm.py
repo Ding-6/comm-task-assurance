@@ -256,13 +256,12 @@ def decide(payload: _ApproveIn) -> ApiResponse:
 def recv_repair(payload: RepairReceiveIn) -> ApiResponse:
     if payload.est_finish_min is None and payload.actual_finish_min is None:
         return ApiResponse(code=400, message="est_finish_min / actual_finish_min 至少传一个")
-    now = payload.as_of_min if payload.as_of_min is not None else get_clock().now_min()
-    est_abs = now + payload.est_finish_min if payload.est_finish_min is not None else None
-    actual_abs = now + payload.actual_finish_min if payload.actual_finish_min is not None else None
+    # 修复（major 5）：est/actual_finish_min 已为绝对分钟（与自然语言分支一致），
+    # 不再加 now；之前加 now 会让 T+20 时回单 45 变成 65 > 50 → 错判超期 → REPAIR 作废
     result = handle_repair_update(
         order_code=payload.order_code,
-        est_finish_min=est_abs,
-        actual_finish_min=actual_abs,
+        est_finish_min=payload.est_finish_min,
+        actual_finish_min=payload.actual_finish_min,
         as_of_min=payload.as_of_min,
     )
     return ApiResponse(data=result)
