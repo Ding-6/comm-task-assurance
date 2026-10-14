@@ -39,11 +39,16 @@ export function stripTplus(s) {
   return String(s).replace(/T\s*\+\s*(\d+)/g, (_, n) => rel(Number(n)));
 }
 
-/** "X 分钟后" → 未来绝对时刻（HH:mm） */
+/** "X 分钟后" / "Y 小时 Z 分钟后" → 未来绝对时刻（HH:mm）
+ *  修复（major 11）：之前只匹配首个出现的数字，"1 小时 15 分钟后" 会被
+ *  分钟正则抢匹配 → 只加 15 分钟。现在先抽小时再加分钟。
+ */
 export function absoluteAt(d, relStr) {
-  const m = relStr.match(/(\d+)\s*分钟/);
-  if (m) return plusMin(d, Number(m[1]));
+  let total = 0;
   const h = relStr.match(/(\d+)\s*小时/);
-  if (h) return plusMin(d, Number(h[1]) * 60);
+  if (h) total += Number(h[1]) * 60;
+  const m = relStr.match(/(\d+)\s*分钟/);
+  if (m) total += Number(m[1]);
+  if (total > 0) return plusMin(d, total);
   return formatShort(d);
 }
