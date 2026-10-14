@@ -125,6 +125,10 @@ def generate_plans(alarm_link_code: str, as_of_min: Optional[int] = None,
     # 分钟数字误当成链路编码。
     if not backup_code:
         import re as _re
+        # 修复（round3 minor B）：第 4 个早期"故障转 X"模式会同时匹配
+        # 源链路和目的链路（'L-1H 故障转 L-2H' → 同时收 L-1H / L-2H），
+        # 删掉它。前 3 个模式已经覆盖 _execute_reroute / switch / restore
+        # 三条真实写入路径。如有需要再补"故障转 L-X"形式，但要求严格带源语义。
         _NOTE_PATTERNS = [
             # "L-1H 批准转备用，由 L-2H 执行"  —— _execute_reroute 写
             _re.compile(r"由\s*(L-[\w-]+)\s*(?:执行|批准|切换|迁入)?"),
@@ -132,8 +136,6 @@ def generate_plans(alarm_link_code: str, as_of_min: Optional[int] = None,
             _re.compile(r"由\s*(L-[\w-]+)\s*切换而来"),
             # "从 L-1H 迁出"  —— restore 写
             _re.compile(r"从\s*(L-[\w-]+)\s*迁出"),
-            # "L-1H 故障转 L-2H"  —— 早期注释形式
-            _re.compile(r"(L-[\w-]+)\s*(?:故障|转|迁|切)"),
         ]
         derived_targets: List[str] = []
         for b in latest.values():
