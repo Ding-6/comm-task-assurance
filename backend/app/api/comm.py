@@ -10,6 +10,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from app.common.exceptions import BizException
 from app.common.ws import get_hub
 from app.core.scene_clock import get_clock
 from app.db.repo import (
@@ -246,6 +247,50 @@ def decide(payload: _ApproveIn) -> ApiResponse:
         from app.common.exceptions import BizException
         raise BizException(message=str(e) or e.__class__.__name__, code=400)
     return ApiResponse(data=ap.to_dict() if hasattr(ap, "to_dict") else ap)
+
+
+# ============================================================
+# SK-04b 批量拒绝告警下所有待审批方案 → POST /api/comm/plans/reject-all
+# 修复（round2 minor E）：原 onRejectAll 循环 /approve，
+#   第 2 次起被后端 _do_decide 标 "已作废" 而 400，前端 toast 噪音。
+#   改成一次接口调用：先按 alarm_code 找 pending plans，逐个拒绝并结算。
+# ============================================================
+
+class _RejectAllIn(BaseModel):
+    alarm_code: str
+    reason: Optional[str] = "批量拒绝全部方案"
+    approver: str = "ROLE-APPROVER"
+    decision_source: str = "人工"
+
+
+@router.post("/plans/reject-all", response_model=ApiResponse)
+def reject_all_plans(payload: _RejectAllIn) -> ApiResponse:
+    pendings = PlanRepo.list_pending_by_alarm(payload.alarm_code)
+    if not pendings:
+        return ApiResponse(data={"rejected": 0, "approvals": []})
+    approvals: List[dict] = []
+    rejected = 0
+    # 逐个拒绝；第一个成功后会把它同 alarm 下的兄弟置"已作废"，
+    # 我们用 _do_decide 自身行为来保持一致性。
+    for p in pendings:
+        if p.status != "待审批":
+            continue
+        try:
+            ap = decide_approval(
+                plan_code=p.plan_code,
+                decision="拒绝",
+                reason=payload.reason,
+                approver=payload.approver,
+                decision_source=payload.decision_source,
+            )
+            approvals.append(ap.to_dict() if hasattr(ap, "to_dict") else ap)
+            rejected += 1
+        except ValueError:
+            # 已被并发处理过（已作废 / 状态非待审批）—— 静默跳过
+            continue
+        except BizException:
+            raise
+    return ApiResponse(data={"rejected": rejected, "approvals": approvals})
 
 
 # ============================================================

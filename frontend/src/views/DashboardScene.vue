@@ -117,7 +117,7 @@ import InputPanel from '../components/InputPanel.vue';
 import TaskFormDialog from '../components/TaskFormDialog.vue';
 import LinkFormDialog from '../components/LinkFormDialog.vue';
 import { getScene, STEP_KEYS } from '../data/scenes';
-import { resetScene, decideApproval } from '../utils/api';
+import { resetScene, decideApproval, rejectAllPlans } from '../utils/api';
 import { createSceneSocket } from '../utils/ws';
 import { formatClock, plusMin, rel } from '../utils/time';
 import { useRouter } from 'vue-router';
@@ -176,24 +176,23 @@ function onDecide({ plan }) {
   if (plan.type === 'REROUTE') jumpTo('m21');
 }
 async function onRejectAll() {
-  // 修复（round2 minor A）：scene 是 computed ref，script 里要 .value 读
-  // 同时只处理仍为"待审批"的 plan，跳过"已作废"避免后端 400 toast 噪音
-  const plans = (scene.value.approval?.plans) || [];
-  let rejected = 0;
-  for (const p of plans) {
-    if (p.status && p.status !== '待审批') continue;
-    try {
-      await decideApproval({
-        plan_code: p.code,
-        decision: '拒绝',
-        reason: '批量拒绝全部方案',
-        approver: 'ROLE-APPROVER',
-        decision_source: '人工',
-      });
-      rejected += 1;
-    } catch {/* http.js 已 ElMessage */}
+  // 修复（round2 minor A + E）：scene 是 computed ref，要 .value
+  // 走单一后端接口 /comm/plans/reject-all，原子批拒绝一个告警下所有待审批方案
+  const approval = scene.value.approval;
+  if (!approval?.alarmCode) {
+    ElMessage.warning('当前没有可拒绝的告警');
+    return;
   }
-  ElMessage.warning(rejected > 0 ? `已拒绝 ${rejected} 个方案` : '没有可拒绝的待审批方案');
+  try {
+    const res = await rejectAllPlans({
+      alarm_code: approval.alarmCode,
+      reason: '批量拒绝全部方案',
+      approver: 'ROLE-APPROVER',
+      decision_source: '人工',
+    });
+    const rejected = res?.data?.rejected ?? 0;
+    ElMessage.warning(rejected > 0 ? `已拒绝 ${rejected} 个方案` : '没有可拒绝的待审批方案');
+  } catch {/* http.js 已 ElMessage */}
 }
 
 function goReport() { router.push('/report'); }

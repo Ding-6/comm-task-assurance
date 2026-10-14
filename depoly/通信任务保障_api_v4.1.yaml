@@ -180,6 +180,45 @@ paths:
                           status: {type: string}
                           executed: {type: boolean}
 
+  /api/comm/plans/reject-all:
+    post:
+      tags: [业务能力]
+      summary: SK-04b 批量拒绝告警下所有待审批方案
+      description: 一次接口调用，把 alarm_code 下所有 status=待审批 的方案标记为拒绝并落审计；其它状态静默跳过
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectAllIn'
+            example:
+              alarm_code: AL-02
+              reason: 批量拒绝全部方案
+              approver: ROLE-APPROVER
+              decision_source: 人工
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/BaseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          rejected: { type: integer, example: 2 }
+                          approvals:
+                            type: array
+                            items: { $ref: '#/components/schemas/ApprovalView' }
+        '400':
+          description: 参数错误
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BaseError' }
+
   /api/comm/repair:
     post:
       tags: [业务能力]
@@ -855,6 +894,16 @@ components:
         approver: {type: string, nullable: true, example: ROLE-APPROVER}
         decision_source: {type: string, enum: [人工, 超时自动], nullable: true}
         decided_min: {type: integer, nullable: true}
+
+    RejectAllIn:
+      type: object
+      description: 批量拒绝告警下所有待审批方案入参
+      required: [alarm_code]
+      properties:
+        alarm_code: {type: string, example: AL-02}
+        reason: {type: string, nullable: true, example: 批量拒绝全部方案}
+        approver: {type: string, default: ROLE-APPROVER, example: ROLE-APPROVER}
+        decision_source: {type: string, default: 人工, enum: [人工, 超时自动]}
 
     # ============================================================
     # WebSocket 消息 schema

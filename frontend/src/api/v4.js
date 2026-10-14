@@ -28,6 +28,9 @@ export const generatePlan = (payload) => http.post('/comm/plan', payload);
 // SK-04 ACT-04 人工审批决策
 // ============================================================
 export const approvePlan = (payload) => http.post('/comm/approve', payload);
+// 修复（round2 minor E）：批量拒绝改走单一接口，避免循环 /approve
+// 第 2 次起被后端 _do_decide 标"已作废" → 400 toast 噪音
+export const rejectAllPlans = (payload) => http.post('/comm/plans/reject-all', payload);
 
 // ============================================================
 // SK-05 ACT-05 修理单回执登记（含修理完成）
