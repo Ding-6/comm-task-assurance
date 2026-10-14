@@ -443,7 +443,7 @@ function updateGauges(){
     c.setOption({
       series:[
         {data:[{value:cur}]},
-        {data:[{value:fut}], pointer:{itemStyle:{color: fut>=cap?'#ef4444':(fut>=8?'#eab308':'#fbbf24')}}}
+        {data:[{value:fut}], pointer:{itemStyle:{color: fut>=(lk.cap||0)?'#ef4444':(fut>=8?'#eab308':'#fbbf24')}}}
       ]
     });
   });
