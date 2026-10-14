@@ -73,6 +73,9 @@ async def _cancel_countdown_async(alarm_code: str) -> None:
     task = await _pop_countdown_locked(alarm_code)
     if task is None or task.done():
         return
+    # 关键：不要取消调用方自己的任务（_runner 内部用），否则后续 await 会 CancelledError
+    if task is asyncio.current_task():
+        return
     task.cancel()
     try:
         await task
@@ -295,12 +298,14 @@ def start_countdown(alarm_code: str, plan_code: str, timeout_sec: int = 60) -> N
         default = next((p for p in pending if p.is_default == "是"), None)
         if default is None:
             return
-        async with _DECIDE_LOCK:
-            await _do_decide(
-                plan_code=default.plan_code, decision="批准",
-                reason="60 秒未决策，自动执行保守默认方案",
-                approver="SYSTEM", decision_source="超时自动",
-            )
+        # 关键修复：不要在 _DECIDE_LOCK 内再调用 _do_decide——
+        # _do_decide 内部也会请求同一把锁（asyncio.Lock 非可重入），
+        # 那样会导致 60 秒超时路径死锁。直接调用，依赖 _do_decide 自身的锁。
+        await _do_decide(
+            plan_code=default.plan_code, decision="批准",
+            reason="60 秒未决策，自动执行保守默认方案",
+            approver="SYSTEM", decision_source="超时自动",
+        )
 
     try:
         loop = asyncio.get_running_loop()
