@@ -53,8 +53,13 @@ def handle_link_down(alarm_link_code: str, as_of_min: Optional[int] = None) -> D
     if fault is None:
         raise ValueError(f"链路不存在: {alarm_link_code}")
 
-    # 幂等：已 down 且无承载任务 → 直接返回
+    # 幂等：已 down 且无承载任务 → 直接返回，并推一条 toast 提示
     if fault.oper_state == "down" and not _fault_tasks(alarm_link_code):
+        from app.services.engine import safe_push
+        safe_push("toast", {
+            "level": "info",
+            "message": f"{alarm_link_code} 已处于中断状态，无承载任务可切",
+        })
         return {"switched_tasks": [], "repair_order_code": "", "from_link": alarm_link_code, "to_link": None}
 
     LinkRepo.update_oper_state(alarm_link_code, "down")

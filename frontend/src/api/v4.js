@@ -85,7 +85,8 @@ export const getEvidenceReport = () => http.get('/comm/evidence/report');
 // ============================================================
 // 引擎接口（§7.2）
 // ============================================================
-export const startScene = () => http.post('/scene/start');
+// startScene 后端 SceneStartIn {offset_min: int = 0}，FastAPI body 必填
+export const startScene = (payload = { offset_min: 0 }) => http.post('/scene/start', payload);
 export const pauseScene = () => http.post('/scene/pause');
 export const resumeScene = () => http.post('/scene/resume');
 export const getSceneState = () => http.get('/scene/state');

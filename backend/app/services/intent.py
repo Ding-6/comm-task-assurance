@@ -66,6 +66,11 @@ SUGGESTIONS: List[Dict[str, str]] = [
 ]
 
 
+def _normalize(text: str) -> str:
+    """去掉所有空白，用于中文关键词匹配（兼容"线路 1 故障"与"线路1故障"）。"""
+    return re.sub(r"\s+", "", text or "")
+
+
 def _extract_link(text: str) -> Optional[str]:
     """从文本里识别链路编码。"""
     # 1. 规范化 L-xH / LxH → L-{1|2|3}H
@@ -73,16 +78,18 @@ def _extract_link(text: str) -> Optional[str]:
     if m:
         return f"L-{m.group(1)}H"
 
-    # 2. 中文关键词
+    # 2. 中文关键词（先去空白，兼容"线路 1"、"线路1"等）
+    compact = _normalize(text)
     for kw, code in LINK_KEYWORDS.items():
-        if kw in text:
+        if kw in compact:
             return code
     return None
 
 
 def _extract_task(text: str) -> Optional[str]:
+    compact = _normalize(text)
     for kw, code in TASK_KEYWORDS.items():
-        if kw in text:
+        if kw in compact:
             return code
     return None
 

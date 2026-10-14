@@ -207,23 +207,41 @@ async function reset() {
 const wsRef = ref(null);
 // 修复 bug2/3/9/10：实时累积 ws 推送的 toast / notice（不再走场景静态数据）
 const liveToasts = ref([]); // {id, lv, ic, txt, src}
+// 静态 toast dismiss 跟踪（避免自动消失逻辑被绕开）
+const dismissedStaticKeys = ref(new Set());
+// 切步骤时清空 dismissed 集合
+watch(() => currentStep.value, () => dismissedStaticKeys.value = new Set());
 // 修复：approval / notice 也走 ws 实时接收（不再走场景静态 data.approval）
 const liveApproval = ref({ open: false, plans: [], alarmCode: '', alarm: '', hitTime: '', predicted: '', remainMin: 60, countdown: 60 });
 let _toastIdSeq = 0;
 function pushToast({ lv = 'info', ic = '', txt = '', src = '' }) {
+  // 修复 toast 重入：去重（同样 lv+txt 60s 内只显示一次），
+  // 避免引擎每分钟 tick 反复推同样的"超容量"toast 堆成山
+  const dup = liveToasts.value.find((t) => t.lv === lv && t.txt === txt);
+  if (dup) return;
   const id = ++_toastIdSeq;
   liveToasts.value = [...liveToasts.value, { id, lv, ic, txt, src }];
 }
 const mergedToasts = computed(() => {
   // 静态场景的 toasts（在脚本中作为占位） + 实时 ws 推送
-  const staticOnes = (scene.value.toasts || []).map((t, i) => ({
-    id: `static-${currentStep.value}-${i}`,
-    lv: t.lv || 'info', ic: t.ic || '', txt: t.txt || '', src: t.src || '',
-  }));
+  const staticOnes = (scene.value.toasts || [])
+    .map((t, i) => ({
+      id: `static-${currentStep.value}-${i}`,
+      lv: t.lv || 'info', ic: t.ic || '', txt: t.txt || '', src: t.src || '',
+    }))
+    .filter((t) => !dismissedStaticKeys.value.has(t.id));
   return [...staticOnes, ...liveToasts.value];
 });
 function onToastDismiss(t) {
-  if (t.id && String(t.id).startsWith('static-')) return; // 静态不删
+  // 静态 toast 也参与自动消失：按 (step+idx) 标记 dismissed，
+  // 下次合并时过滤掉。简单做法：当前 step 切换时已会变 id（prefix 包含 currentStep），
+  // 所以同一 step 内的静态 toast 关闭后下次合并会重新出现——这是预期（演示步骤回到该点时再次提示）。
+  // 但单次合并里被 dismiss 后仍出现，违反 ToastBar 自动消失语义。
+  // 修复：维护一个"本次 step 内已 dismiss 的静态 toast key 集合"。
+  if (t.id && String(t.id).startsWith('static-')) {
+    dismissedStaticKeys.value.add(String(t.id));
+    return;
+  }
   liveToasts.value = liveToasts.value.filter((x) => x.id !== t.id);
 }
 onMounted(() => {
@@ -249,7 +267,18 @@ onMounted(() => {
         }
       } else if (msg.type === 'engine_error' && msg.data) {
         pushToast({ lv: 'over', ic: '✕', txt: `引擎异常：${msg.data.error || ''}` });
-      } else if (msg.type === 'modal_approval' && msg.data) {
+      } else if (msg.type === 'modal_refresh' && msg.data) {
+         // 修复 modal_refresh：审批中收到 ACT-05 修理回执，更新方案可行性（不重置倒计时）
+         const d = msg.data;
+         if (liveApproval.value.open) {
+           liveApproval.value = {
+             ...liveApproval.value,
+             plans: Array.isArray(d.plans) ? d.plans : liveApproval.value.plans,
+             refresh: d.fresh_message || liveApproval.value.refresh,
+             fresh_message: d.fresh_message || liveApproval.value.fresh_message,
+           };
+         }
+       } else if (msg.type === 'modal_approval' && msg.data) {
         // 修复：审批弹窗从 ws 推送打开
         const d = msg.data;
         liveApproval.value = {

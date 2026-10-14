@@ -11,8 +11,10 @@ import http from './http';
 /** 复位场景（业务数据 + 时钟 + 后台循环） */
 export const resetScene = () => http.post('/scene/reset');
 
-/** 启动场景（V4.1 实时模式：以墙钟为 T+0） */
-export const startScene = () => http.post('/scene/start');
+/** 启动场景（V4.1 实时模式：以墙钟为 T+0）
+ * 修复：后端 SceneStartIn {offset_min: int = 0} 必填 body，默认 0 表示立刻启动
+ */
+export const startScene = (payload = { offset_min: 0 }) => http.post('/scene/start', payload);
 
 /** 暂停 / 恢复 / 状态快照 */
 export const pauseScene = () => http.post('/scene/pause');
