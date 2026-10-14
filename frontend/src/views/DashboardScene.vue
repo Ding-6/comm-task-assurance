@@ -176,9 +176,12 @@ function onDecide({ plan }) {
   if (plan.type === 'REROUTE') jumpTo('m21');
 }
 async function onRejectAll() {
-  // 修复（major 9）：拒绝全部要走后端真实接口，否则审计与 DB 不一致
-  const plans = scene.approval.plans || [];
+  // 修复（round2 minor A）：scene 是 computed ref，script 里要 .value 读
+  // 同时只处理仍为"待审批"的 plan，跳过"已作废"避免后端 400 toast 噪音
+  const plans = (scene.value.approval?.plans) || [];
+  let rejected = 0;
   for (const p of plans) {
+    if (p.status && p.status !== '待审批') continue;
     try {
       await decideApproval({
         plan_code: p.code,
@@ -187,9 +190,10 @@ async function onRejectAll() {
         approver: 'ROLE-APPROVER',
         decision_source: '人工',
       });
+      rejected += 1;
     } catch {/* http.js 已 ElMessage */}
   }
-  ElMessage.warning('已拒绝全部方案');
+  ElMessage.warning(rejected > 0 ? `已拒绝 ${rejected} 个方案` : '没有可拒绝的待审批方案');
 }
 
 function goReport() { router.push('/report'); }
