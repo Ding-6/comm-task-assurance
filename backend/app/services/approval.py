@@ -307,10 +307,33 @@ def start_countdown(alarm_code: str, plan_code: str, timeout_sec: int = 60) -> N
             approver="SYSTEM", decision_source="超时自动",
         )
 
+    # 修复（major 8）：HTTP 路由在 worker 线程里跑，没有 running loop，
+    # get_running_loop() 会 RuntimeError；之前 except: pass 静默吞掉，
+    # 60 秒超时自动路径只在引擎 tick 里能跑起来，HTTP 触发的方案超时永远不生效。
+    # 现在：先尝试当前线程 loop；没有则把 _runner 调度到 _MAIN_LOOP（lifespan 注册）。
+    started = False
     try:
         loop = asyncio.get_running_loop()
         task = loop.create_task(_runner())
         _set_main_loop(loop)
-        asyncio.run_coroutine_threadsafe(_set_countdown_locked(alarm_code, task), loop)
+        loop.create_task(_set_countdown_locked(alarm_code, task))
+        started = True
     except RuntimeError:
+        pass
+
+    if not started:
+        main_loop = _MAIN_LOOP
+        if main_loop is not None and not main_loop.is_closed():
+            try:
+                async def _start() -> None:
+                    task = main_loop.create_task(_runner())
+                    await _set_countdown_locked(alarm_code, task)
+
+                asyncio.run_coroutine_threadsafe(_start(), main_loop)
+                started = True
+            except Exception:
+                pass
+
+    if not started:
+        # 实在没办法（_MAIN_LOOP 也没注册），前端超时计时器是最后兜底
         pass
