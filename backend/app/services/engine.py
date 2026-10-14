@@ -398,6 +398,10 @@ def handle_input(category: str, payload: Any) -> Dict[str, Any]:
 
 
 def _dispatch_parsed(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    # 修复（minor 7）：parse_input 未识别时返回 {category: None, suggestions: ...}
+    # 不应再 raise ValueError 让前端收 400；按 OpenAPI SceneInputFailData 透传
+    if parsed.get("category") is None or parsed.get("sub_type") is None:
+        return parsed
     sub = parsed.get("sub_type")
     params = parsed.get("params", {})
     minute_offset = parsed.get("minute_offset")
