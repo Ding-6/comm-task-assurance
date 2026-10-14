@@ -115,24 +115,37 @@ def generate_plans(alarm_link_code: str, as_of_min: Optional[int] = None,
     PlanRepo.insert(repair_plan)
     plans.append(repair_plan)
 
-    # 修复（major 4）：当故障链路自身没有 backup_link_code 时，
-    # 用其上"被切过来"的任务原链路（note 含 "由 X 切换而来"）的 backup_link_code 作为目标。
+    # 修复（major 4 + round2 minor C）：当故障链路自身没有 backup_link_code 时，
+    # 用其上"被切过来"的任务原链路的 backup_link_code 作为目标。
     # §1.6 场景：L-2H 无 backup，但 L-1H 有 backup=L-3H；T-A 由 L-1H 切到 L-2H 触发容量告警，
     # REROUTE 必须能迁回 L-3H。
+    #
+    # 我们识别 _execute_reroute / switch / restore 在 comm_task_link.note 里
+    # 写入的所有迁移痕迹，并只采用形如 L-XXX 的 token，避免把"由 20 执行"里的
+    # 分钟数字误当成链路编码。
     if not backup_code:
+        import re as _re
+        _NOTE_PATTERNS = [
+            # "L-1H 批准转备用，由 L-2H 执行"  —— _execute_reroute 写
+            _re.compile(r"由\s*(L-[\w-]+)\s*(?:执行|批准|切换|迁入)?"),
+            # "由 L-1H 切换而来"  —— switch.handle_link_down 写
+            _re.compile(r"由\s*(L-[\w-]+)\s*切换而来"),
+            # "从 L-1H 迁出"  —— restore 写
+            _re.compile(r"从\s*(L-[\w-]+)\s*迁出"),
+            # "L-1H 故障转 L-2H"  —— 早期注释形式
+            _re.compile(r"(L-[\w-]+)\s*(?:故障|转|迁|切)"),
+        ]
         derived_targets: List[str] = []
         for b in latest.values():
-            note = b.note or ""
-            if "由" in note and "切换而来" in note:
-                # note 形如 "L-1H 批准转备用，由 20 执行" 或 "L-1H 切换而来"
-                import re as _re
-                m = _re.search(r"由\s*(\S+?)\s*(?:批准|切换|执行|故障|恢复)", note)
-                if not m:
-                    # 退而求其次：取 "由 X" 后面第一个非空 token
-                    m = _re.search(r"由\s+(\S+)", note)
-                if m:
+            note = (b.note or "").strip()
+            if not note:
+                continue
+            for pat in _NOTE_PATTERNS:
+                for m in pat.finditer(note):
                     orig = m.group(1)
-                    if orig and orig not in (None, alarm_link_code):
+                    if not orig or orig == alarm_link_code:
+                        continue
+                    if orig not in derived_targets:
                         derived_targets.append(orig)
         # 拿原链路的 backup_link_code 作为目标
         derived_backup = None

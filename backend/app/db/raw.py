@@ -200,6 +200,12 @@ def execute_returning_id(sql: str, params: Optional[Sequence[Any]] = None) -> in
 def transaction() -> Iterator[pymysql.connections.Connection]:
     """事务上下文：进入时拿连接 + 绑定 ContextVar，
     内部 SQL helper 自动复用该连接；退出时统一 commit / rollback。
+
+    修复（round2 minor B）：事务内若任意 SQL helper 抛错，
+    本 with 块会进入 except 分支对**整个事务**回滚，
+    前面已成功的 INSERT/UPDATE 不会"静默丢弃"——全部撤销。
+    注意：调用方**不要**在 `with transaction() as conn:` 内部 try/except
+    把异常吞掉，否则会让事务提前以 commit() 退出、跳过 rollback。
     """
     in_tx_token = _IN_TX.set(True)
     conn_token = _TX_CONN.set(None)
@@ -223,12 +229,17 @@ def transaction() -> Iterator[pymysql.connections.Connection]:
         conn_token = _TX_CONN.set(conn)
         yield conn
         conn.commit()
-    except Exception:
+    except BaseException:
+        # 关键：必须 rollback，否则早期写会留在事务里等待连接归还
         if conn is not None:
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as rb_exc:
+                # 这里的 rollback 失败通常意味着连接已断，记录但不掩盖原始异常
+                import logging
+                logging.getLogger(__name__).warning(
+                    "transaction rollback failed: %s", rb_exc
+                )
         raise
     finally:
         _IN_TX.reset(in_tx_token)

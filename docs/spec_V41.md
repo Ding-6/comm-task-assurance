@@ -3,13 +3,14 @@
 **规格说明书**
 
 版本 V4.1 · 2026-10-13 · 智元本体智能体平台部署版
+（V4.1 增补：业务场景全覆盖所需的动作归类、事件→动作触发链、前瞻窗口调整能力、容量预检能力）
 
   ---------- ----------------------------------------------------------------------------------------------------------------------------------------
   **项**     **内容**
   对象类型   8 类（CommTask / CommLink / TrafficDemand / ResourceAlarm / ApprovalRecord / CommPlan / RepairOrder / SceneEvent）
   关系类型   8 种（任务占用链路 / 链路互为备用 / 告警发生于链路 / 需求关联任务 / 审批针对方案 / 方案处置告警 / 修理单针对链路 / 事件引用对象）
   动作类型   6 个（ACT-01 切换 / ACT-02 占用预警 / ACT-03 方案生成 / ACT-04 审批决策 / ACT-05 修理回执评估 / ACT-06 回迁释放）
-  能力接口   14 个业务能力 + 8 个引擎接口（含 1 个 WebSocket）
+  能力接口   15 个业务能力 + 8 个引擎接口（含 1 个 WebSocket，含 5 路实时推送事件类型）
   物理表     9 张（comm_task / comm_link / comm_demand / comm_alarm / comm_task_link / comm_approval / comm_plan / comm_repair_order / comm_event）
   数据源     zb_db2 @ 172.17.6.242:5904（本体平台同源）
   场景时钟   实时时钟，1:1 对应演示真实时间；以启动时刻为 T+0，T+N 即真实经过 N 分钟
@@ -18,6 +19,8 @@
   数据入口   输入框模拟外部设备传输；四类输入：任务 / 链路 / 事故 / 提示
   判定口径   预警线作用于未来占用；容量超限由前瞻窗口内绑定时刻的预测占用判定
   审批策略   60 秒倒计时；超时自动执行保守默认方案（转备用链路）
+  事件驱动   任一外部输入/状态变化均归一为事件；事件触发动作；动作执行结果再次触发事件——形成持续判定闭环
+  前瞻窗口   链路级 + 任务级双层配置；可按重要任务上调（如指挥通信任务配 60 分钟）
   ---------- ----------------------------------------------------------------------------------------------------------------------------------------
 
 本文档汇总通信任务保障场景的全部对象、关系、动作、数据集、能力接口与数据库结构，作为智元本体智能体平台建模与部署的完整依据。V4.1
@@ -113,9 +116,22 @@ L-1H；直播传输保障与既有传输保障共用 L-2H；L-3H 留作备用。
   提示       文本输入              如「50 分钟后直播需求到 6G」「线路 1 修好了」「修理单预计 55 分钟完成」   POST /api/comm/demand / /api/comm/restore / /api/comm/repair   对应事件 → 对应动作
   ---------- --------------------- ------------------------------------------------------------------------- -------------------------------------------------------------- -------------------------
 
-说明：任务与链路两类在输入框上有独立的「添加」按键，弹出表格逐项填写；事故与提示两类为文本输入，由
-Agent
-完成意图识别与参数抽取后落到对应接口。四类输入写入后均产生事件，驱动本体重新读取判定。
+说明：任务与链路两类在输入框上有独立的「添加」按键，弹出表格逐项填写；事故与提示两类为文本输入，由 Agent 完成意图识别与参数抽取后落到对应接口。四类输入写入后均产生事件，驱动本体重新读取判定。
+
+### 1.5.1 四类输入 → 动作 触发链
+
+业务说明书 §4 / §7 要求每类输入都要落到具体动作上，本节给出完整映射：
+
+| 输入类别 | 填写方式 | 后端落点 | 写入事件 | 触发动作 | 备注 |
+|---|---|---|---|---|---|
+| 任务 | 独立按键 → 表格 | comm_task + 首条 comm_demand + comm_task_link 归属行 | task_added | ACT-02 全局重算 | 新任务撑爆链路 → ACT-03 → ACT-04 |
+| 链路 | 独立按键 → 表格 | comm_link | link_added | ACT-02 全局重算 | 新链路以 0 占用进入资源池 |
+| 事故 | 文本输入 | comm_alarm + comm_event | alarm_injected | ACT-01 自动切换 + ACT-02 | 同时发起修理请求 RP-... |
+| 提示（需求变更） | 文本输入 | comm_demand + comm_event | demand_change / task_booked | ACT-02 | 带"分钟后"即登记为预订事件，到点兑现 |
+| 提示（链路恢复） | 文本输入 | comm_link.oper_state=up + comm_event | link_restored | ACT-06 回迁 | 自动回迁 + 释放备用 |
+| 提示（修理回执） | 文本输入 | comm_repair_order 回执 + comm_event | repair_received | ACT-05 评估 | 评估后可能作废 REPAIR 方案（晚于关键期） |
+
+**预订事件兑现机制**：带"N 分钟后"时间状语的输入登记为预订事件（comm_event.event_type = task_booked，occur_min = now + N），不立即触发动作；场景时钟每推进 1 分钟扫描一次，到点兑现为真实事件并触发对应动作。
 
 ## 1.6 占用推演
 
@@ -179,6 +195,22 @@ Gbit/s；未来占用取各任务最近一次需求变更后的值（折叠值�
 
 **本场景三条链路与三项任务均配 30 分钟，故 T+15 窗口 \[15, 45\] 覆盖不到
 T-B 的 T+50 变更点，T+20 窗口 \[20, 50\] 首次覆盖并命中超限。**
+
+### 1.7.1 前瞻窗口调整（业务说明书 §7 操作速查）
+
+业务说明书 §7 明确："想让系统更早报警，把该项任务的前瞻窗口调大（如 60 分钟），提前量越大留给人工的余量越足。"
+
+| 维度 | 字段 | 取值范围 | 业务含义 |
+|---|---|---|---|
+| 链路级 | comm_link.lookahead_min | 10 ~ 120 分钟 | 链路维度的默认提前量 |
+| 任务级 | comm_task.lookahead_min | 10 ~ 120 分钟 | 任务重要度上调（如指挥通信任务配 60 分钟） |
+
+**有效窗口**：LOOKAHEAD(L, m) = max(comm_link[L].lookahead_min, 该链路承载全部任务 lookahead_min 的最大值)；字段为空按 30 分钟缺省。
+
+**调整入口**：通过 SK-12 调整前瞻窗口接口（见 §7.1）修改链路或任务的 lookahead_min，修改立即生效，下一次 ACT-02 tick 即按新窗口前瞻扫描。
+> 注：本节早期版本误标为 SK-11；§7.1 表中"调整前瞻窗口"已正式编号为 SK-12（"SK-11" 现为"添加任务前容量预检"，是另一条独立能力）。
+
+**典型场景验证（业务说明书验收用例 TC-14）**：将 T-A 的 lookahead_min 由 30 改为 60，则 L-1H 的有效前瞻窗口变为 60 分钟；T+15 窗口变为 [15, 75] 即首次覆盖 T+50，命中超限预警——验证分级配置生效。
 
 ## 1.8 审批超时与保守默认策略
 
@@ -419,8 +451,28 @@ task_uses_link 的实例存于物理表 comm_task_link；link_backup_of
 
 # 4. 动作类型（6 个）
 
-V4.0 保持 6 个动作不变。输入框的任务与链路登记不新增动作------登记后产生
+V4.0 保持 6 个动作不变。输入框的任务与链路登记不新增动作——登记后产生
 task_added / link_added 事件，该事件触发 ACT-02 全局重算即可闭环。
+
+## 4.0 动作归类总表（业务说明书 §6.4 对齐）
+
+业务说明书 §6.4 列出了"哪些事系统自己做、哪些要人批"，本节按该口径归类 6 个动作，并明确前端呈现方式与 WebSocket 推送事件类型：
+
+| 动作 | 谁做 | 前端呈现 | WebSocket 推送 | 备注 |
+|---|---|---|---|---|
+| ACT-01 识别异常并自动切换 | 系统自动 | 告知型弹窗（可关闭，不影响时钟） | modal_notice | 切换+修理请求同步 |
+| ACT-02 计算占用并前瞻预警 | 系统自动 | 顶部提示条（黄色 / 红色） | toast | 超容量再触发 ACT-03 |
+| ACT-03 生成处置方案 | 系统自动 | 模态框 + 60 秒倒计时（占屏不停表） | modal_approval | 启动 ACT-04 倒计时 |
+| ACT-04 人工审批决策 | 人工（系统不得自批） | 模态框交互 | modal_close | 超时走保守默认 → decision_source=超时自动 |
+| ACT-05 修理回执评估 | 系统自动 | 顶部提示条（若审批挂起中则刷新模态框） | toast / modal_refresh | REPAIR 晚于关键期 → 标记作废 |
+| ACT-06 链路恢复与任务回迁 | 系统自动 | 顶部提示条 | toast | 不弹窗、不挂起、不需审批 |
+
+**前端呈现细节（业务说明书 §6.4 + 验收用例 TC-05）：**
+
+- 告知型弹窗：标题"链路中断"，正文形如"XX 链路中断，任务已自动切换至 YY 链路"，可关闭
+- 顶部提示条：黄色=超预警线，红色=超容量；纯文本，不阻塞操作
+- 模态框：保守默认方案卡片显示"保守默认"徽章与"60 秒未决策将自动执行此方案"副文案；倒计时同步显示数字与进度条，最后 10 秒高亮
+- 模态框刷新：等待审批期间外部输入（如修理回执）触发 modal_refresh，刷新方案可行性，倒计时不重置
 
 ## 4.01 ACT-01 识别资源异常并自动切换
 
@@ -468,7 +520,7 @@ task_added / link_added 事件，该事件触发 ACT-02 全局重算即可闭环
   write_class         compute                                                                                                              
   requires_approval   否（系统自动执行）                                                                                                   
   能力接口            POST /api/comm/occupancy                                                                                             
-  触发方式            事件发生后立即执行；且场景时钟每推进 1 分钟对全部 up 链路执行一次前瞻扫描                                            
+  触发方式            事件发生后立即执行；且场景时钟每推进 1 分钟对全部 up 链路执行一次前瞻扫描。**输入框的任务登记（task_added）与链路登记（link_added）也触发 ACT-02 全局重算**：新任务撑爆链路 → 进入 ACT-03 方案流程；新链路以 0 占用进入资源池后被纳入前瞻扫描
   呈现方式            超预警线 → 顶部提示条；超容量 → 交由 ACT-03 弹模态框                                                                 
   **参数编码**        **参数名称**                                                                **类型**   **必填**   **说明**           **示例**
   link_code           链路编码                                                                    String     是         待计算占用的链路   L-2H
@@ -548,7 +600,8 @@ task_added / link_added 事件，该事件触发 ACT-02 全局重算即可闭环
   agent_can_call_directly   否（Agent 不得自批）                                                                                                                                                                      
   执行校验                  仅 ROLE-APPROVER 有权执行；超时自动分支由系统以 SYSTEM 身份执行                                                                                                                           
   能力接口                  POST /api/scene/decide                                                                                                                                                                    
-  超时规则                  60 秒决策倒计时归零 → 自动批准并执行 is_default =「是」的方案；倒计时走真实时间，与场景分钟同步推进                                                                                       
+  超时规则                  60 秒决策倒计时归零 → 自动批准并执行 is_default =「是」的方案；倒计时走真实时间，与场景分钟同步推进
+  等待期间外部输入          60 秒等待期内，外部输入（如 ACT-05 修理回执）仍能进来，触发 modal_refresh 实时刷新模态框内方案可行性，倒计时不重置（业务说明书 §6.4 / 验收 TC-06）
   **参数编码**              **参数名称**                                                                                          **类型**   **必填**   **说明**                                                      **示例**
   plan_code                 方案编码                                                                                              String     是         待审批的方案                                                  PLAN-L-1H-REROUTE
   decision                  审批决定                                                                                              String     是         批准 / 拒绝                                                   批准
@@ -826,14 +879,27 @@ ACT-06 回迁定位。
   SK-05      修理单回执登记                  POST       /api/comm/repair      order_code, est_finish_min, actual_finish_min, as_of_min
   SK-06      事故注入（输入框·事故类）       POST       /api/comm/alarm       link_code, alarm_type, native_severity, event_min
   SK-07      链路恢复与任务回迁              POST       /api/comm/restore     link_code, as_of_min
-  SK-08      添加任务（输入框·任务类）       POST       /api/comm/task        task_code, task_name, duration_min, critical_min, link_code, demand_gbps, owner_role
-  SK-09      添加链路（输入框·链路类）       POST       /api/comm/link        link_code, link_name, capacity_gbps, warning_gbps, oper_state, avg_repair_min, backup_link_code
+  SK-08      添加任务（输入框·任务类）       POST       /api/comm/task        task_code, task_name, duration_min, critical_min, link_code, demand_gbps, owner_role, lookahead_min
+  SK-09      添加链路（输入框·链路类）       POST       /api/comm/link        link_code, link_name, capacity_gbps, warning_gbps, oper_state, avg_repair_min, backup_link_code, lookahead_min
   SK-10      需求变更登记（输入框·提示类）   POST       /api/comm/demand      task_code, valid_from_min, demand_gbps
+  SK-11      添加任务前容量预检              POST       /api/comm/precheck/task  link_code, demand_gbps, as_of_min
+  SK-12      调整前瞻窗口                    POST       /api/comm/lookahead   target_type（link|task）, target_code, lookahead_min
   ---        场景快照                        GET        /api/comm/snapshot    as_of_min（查询参数）
   ---        场景复位                        POST       /api/comm/reset       ---
   ---        审批记录查询                    GET        /api/comm/approvals   limit（查询参数）
   ---        事件流水查询                    GET        /api/comm/events      limit, event_type（查询参数）
+  ---        链路列表查询                    GET        /api/comm/links       ---
+  ---        任务列表查询                    GET        /api/comm/tasks       ---
+  ---        告警列表查询                    GET        /api/comm/alarms      ---
+  ---        方案列表查询                    GET        /api/comm/plans       ---
+  ---        修理单列表查询                  GET        /api/comm/repairs     ---
+  ---        前瞻预测查询                    GET        /api/comm/forecast    link_code, as_of_min（查询参数）
+  ---        全窗口证据核对                  GET        /api/comm/evidence/report  ---
   ---------- ------------------------------- ---------- --------------------- -------------------------------------------------------------------------------------------------
+
+**SK-11 容量预检**：业务说明书 §4.2 要求"填完提交后系统立刻重算一遍所有链路的占用；如果新任务把某条链路撑爆了，会自动走方案流程"。SK-11 在提交前先预检（不落库），返回 will_exceed_warning / will_exceed_capacity 标志，前端据此给出"可直接登记 / 建议加备用 / 进入方案流程"提示。**实际登记仍走 SK-08，登记后由 ACT-02 自然触发判定**。
+
+**SK-12 调整前瞻窗口**：业务说明书 §7 操作速查要求"想让系统更早报警，把该项任务的前瞻窗口调大"。SK-12 即时修改 comm_link 或 comm_task 的 lookahead_min 字段，下一次 ACT-02 tick 即按新窗口前瞻扫描。
 
 ## 7.2 引擎接口（演示控制台用）
 
@@ -852,6 +918,21 @@ ACT-06 回迁定位。
 是输入框的统一入口。任务与链路两类由前端按键触发表格填写，提交时直接转调
 SK-08 / SK-09；事故与提示两类为文本输入，由 Agent 完成意图识别后转调
 SK-06 / SK-10 / SK-07 / SK-05。
+
+## 7.3 WebSocket 实时推送事件类型
+
+WS /api/scene/ws 推送 5 类消息，对齐业务说明书 §6.4 "如何通知你"的呈现规范：
+
+| 消息类型 | 触发动作 | 载荷 | 前端表现 | 业务说明书对应 |
+|---|---|---|---|---|
+| state | tick 每分钟一次（ACT-02） | 完整场景快照 | 更新看板 | §7 "看当前每条链路跑了多少" |
+| toast | ACT-02 / ACT-05 / ACT-06 | {level: warn\|error\|info, message} | 顶部提示条 | §6.4 顶部提示条 |
+| modal_notice | ACT-01 | {title, message, level} | 告知型弹窗 | §6.4 告知型弹窗 |
+| modal_approval | ACT-03 | {alarm_code, plans, countdown, deadline_min} | 模态框 + 60s倒计时 | §6.4 模态框 + 倒计时 |
+| modal_refresh | ACT-05（审批挂起中） | {plans, fresh_message, reset_countdown:false} | 模态框实时刷新 | §6.5 / TC-06 |
+| modal_close | ACT-04（含超时自动） | {approval_code, decision, decision_source} | 关闭模态框 | §6.4 关闭模态框 |
+
+**幂等与去重**：同一告警的 modal_approval 同一分钟内不会重复推送（ACT-03 以"告警+方案类型+故障链路"为幂等键）；同一模态框关闭后再次触发需新告警。
 
 # 8. 场景推演时序
 
@@ -885,7 +966,7 @@ Agent 全局判定，形成事件驱动闭环。
   -------- -------------- ----------------------------------------- ----------------------------------------------------------
   **序**   **操作**       **位置**                                  **要点**
   1        解决网络连通   ---                                       平台服务器访问后端地址，或用隧道
-  2        登记能力接口   Skill → 能力注册中心 → API 直连           14 个业务能力，填 URL 与入参
+  2        登记能力接口   Skill → 能力注册中心 → API 直连           15 个业务能力（SK-01 ~ SK-12 + 1 个快照），填 URL 与入参
   3        创建动作类型   Ontology → 本体工作台 → 动作类型          6 个，绑对象类型 + 参数 + 选能力
   4        建立数据集     Ontology → 数据工作台                     9 个，字段与对象属性一致
   5        配置保守默认   Ontology → 本体工作台 → 动作类型 ACT-04   超时 60 秒；默认方案指向 is_default = 是 的 reroute 方案
@@ -906,6 +987,26 @@ backend/.env 配置 TMA_MYSQL_HOST/PORT/USER/PASSWORD/DB 指向 zb_db2
 
 前端：cd frontend && npm install && npm run dev \-- \--host 0.0.0.0
 \--port 5173
+
+# 10. 完整事件 → 动作触发链总图（业务说明书 §7 操作速查对齐）
+
+本节把业务说明书 §7 的 11 项操作速查逐条对应到事件/动作/接口，供建模与开发的端到端校验：
+
+| 用户操作（业务说明书 §7） | 落到后端 | 写入事件 | 触发动作 | 接口 |
+|---|---|---|---|---|
+| 看当前每条链路跑了多少 | WS 推送 state | --- | ACT-02 tick | GET /api/scene/state 或 WS |
+| 报告一条线路断了 | 输入框 → intent 识别 | alarm_injected | ACT-01 + ACT-02 | POST /api/scene/input(category=alarm) 或 POST /api/comm/alarm |
+| 预约未来某时刻的故障 | 输入框 → intent 识别 | task_booked | 到点兑现 → ACT-01 | POST /api/scene/input(category=notice) |
+| 改某个任务的需求 | 输入框 → intent 识别 | demand_change / task_booked | ACT-02 | POST /api/scene/input 或 POST /api/comm/demand |
+| 加一项新任务 | 输入框"添加任务"按键 | task_added | ACT-02 全局重算（超容量则 ACT-03） | POST /api/comm/task |
+| 加一条新链路 | 输入框"添加链路"按键 | link_added | ACT-02 全局重算 | POST /api/comm/link |
+| 告诉系统修好了 | 输入框 → intent 识别 | link_restored | ACT-06 回迁 + 释放 | POST /api/scene/input 或 POST /api/comm/restore |
+| 告诉系统修理进度 | 输入框 → intent 识别 | repair_received | ACT-05 评估 | POST /api/scene/input 或 POST /api/comm/repair |
+| 对方案拍板 | 模态框交互 | approval_decided | ACT-04 执行/拒绝 | POST /api/scene/decide 或 POST /api/comm/approve |
+| 想让系统更早报警 | 调整前瞻窗口 | state_changed | 下次 ACT-02 用新窗口 | POST /api/comm/lookahead（SK-12） |
+| 从头再演示一遍 | 点复位 | 清表 + 重载默认 | --- | POST /api/scene/reset |
+
+**校验对照**：以上 11 条与业务说明书 §7 操作速查 1:1 对齐；任何一条缺接口、缺事件或缺动作触发，即视为本体规格与业务场景脱节，需回到 §4 / §7 增补。
 
 # 附录一 V4.0 → V4.1 变更记录
 
