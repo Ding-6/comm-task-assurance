@@ -92,7 +92,7 @@
 
     <NoticeModal :notice="scene.notice" @close="onNoticeClose" />
     <ApprovalModal
-      :approval="scene.approval"
+      :approval="liveApproval"
       @decide="onDecide"
       @reject-all="onRejectAll"
       @close="onApprovalClose"
@@ -207,6 +207,8 @@ async function reset() {
 const wsRef = ref(null);
 // 修复 bug2/3/9/10：实时累积 ws 推送的 toast / notice（不再走场景静态数据）
 const liveToasts = ref([]); // {id, lv, ic, txt, src}
+// 修复：approval / notice 也走 ws 实时接收（不再走场景静态 data.approval）
+const liveApproval = ref({ open: false, plans: [], alarmCode: '', alarm: '', hitTime: '', predicted: '', remainMin: 60, countdown: 60 });
 let _toastIdSeq = 0;
 function pushToast({ lv = 'info', ic = '', txt = '', src = '' }) {
   const id = ++_toastIdSeq;
@@ -247,6 +249,24 @@ onMounted(() => {
         }
       } else if (msg.type === 'engine_error' && msg.data) {
         pushToast({ lv: 'over', ic: '✕', txt: `引擎异常：${msg.data.error || ''}` });
+      } else if (msg.type === 'modal_approval' && msg.data) {
+        // 修复：审批弹窗从 ws 推送打开
+        const d = msg.data;
+        liveApproval.value = {
+          open: true,
+          plans: Array.isArray(d.plans) ? d.plans : [],
+          alarmCode: d.alarm_code || '',
+          alarm: d.link_code ? `${d.link_code} 前瞻超限` : '容量超限',
+          hitTime: d.predicted_min != null ? `T+${d.predicted_min}` : '',
+          predicted: d.predicted_load != null ? `${Number(d.predicted_load).toFixed(2)}G / ${d.capacity != null ? Number(d.capacity).toFixed(2) : '?'}G` : '',
+          remainMin: d.remain_min != null ? Number(d.remain_min) : 30,
+          countdown: d.countdown != null ? Number(d.countdown) : 60,
+          fresh_message: d.fresh_message || null,
+          refresh: d.fresh_message || null,
+        };
+      } else if (msg.type === 'modal_close' && msg.data) {
+        // 修复 bug11：modal_close 也关掉弹窗
+        liveApproval.value = { ...liveApproval.value, open: false };
       }
     },
   });
