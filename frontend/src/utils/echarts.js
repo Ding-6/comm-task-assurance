@@ -5,7 +5,11 @@
  */
 import * as echarts from 'echarts/core';
 import { LineChart } from 'echarts/charts';
-import { GridComponent, TooltipComponent, LegendComponent, MarkLineComponent, TitleComponent } from 'echarts/components';
+import {
+  GridComponent, TooltipComponent, LegendComponent,
+  MarkLineComponent, MarkAreaComponent, MarkPointComponent,
+  TitleComponent,
+} from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 
 echarts.use([
@@ -14,6 +18,8 @@ echarts.use([
   TooltipComponent,
   LegendComponent,
   MarkLineComponent,
+  MarkAreaComponent,
+  MarkPointComponent,
   TitleComponent,
   CanvasRenderer,
 ]);

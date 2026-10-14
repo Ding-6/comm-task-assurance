@@ -8,7 +8,7 @@
  */
 export function createSceneSocket(opts = {}) {
   const {
-    url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/scene/ws',
+    url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/scene/ws',
     onMessage,
     onOpen,
     onClose,
@@ -46,7 +46,9 @@ export function createSceneSocket(opts = {}) {
       clearInterval(hbTimer); hbTimer = null;
       listeners.onClose && listeners.onClose();
       if (manuallyClosed) return;
-      timer = setTimeout(bind, backoff);
+      // 修复（minor 3）：onclose 后应调度 connect 创建新 socket，
+      // bind 只会把 handler 重新挂到已关闭的 ws 上 → 永远不重连
+      timer = setTimeout(connect, backoff);
       backoff = Math.min(backoff * 2, maxBackoffMs);
     };
   }
