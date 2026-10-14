@@ -1,25 +1,7 @@
-"""SQLAlchemy ORM 模型集合。
+"""DEPRECATED —— ORM 已迁移到 app.db（PyMySQL 原生 SQL）。
 
-通过显式 import 让 Base.metadata 能识别所有模型，便于 metadata.create_all 或反射。
+保留此目录仅为兼容老 import 路径，请改用：
+  - app.db.query / execute / transaction
+  - app.db.row.<Table>Row
+  - app.db.repo.{Task,Link,Demand,Alarm,TaskLink,Approval,Plan,Repair,Event}Repo
 """
-from app.models.task import CommTask
-from app.models.link import CommLink
-from app.models.demand import TrafficDemand
-from app.models.alarm import ResourceAlarm
-from app.models.task_link import TaskLinkBinding
-from app.models.approval import ApprovalRecord
-from app.models.plan import CommPlan
-from app.models.repair_order import RepairOrder
-from app.models.event import SceneEvent
-
-__all__ = [
-    "CommTask",
-    "CommLink",
-    "TrafficDemand",
-    "ResourceAlarm",
-    "TaskLinkBinding",
-    "ApprovalRecord",
-    "CommPlan",
-    "RepairOrder",
-    "SceneEvent",
-]

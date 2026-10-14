@@ -30,3 +30,12 @@ cr_review*.log
 
 # 日志
 *.log
+
+# 前端构建产物
+frontend/dist/
+
+# Node 依赖
+frontend/node_modules/
+
+# Python 缓存（与上同义）
+**/__pycache__/

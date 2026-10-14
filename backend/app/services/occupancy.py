@@ -1,187 +1,156 @@
-"""ACT-02 链路占用计算 + 前瞻预警（容量超限告警 + ws toast）。"""
+"""ACT-02 占用计算 + 前瞻扫描（PyMySQL 原生版，无 ORM）。"""
 from __future__ import annotations
 
-import asyncio
-import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from app.common.ws import get_hub
-from app.core.scene_clock import SceneClock, get_clock
-from app.models.alarm import ResourceAlarm
-from app.models.demand import TrafficDemand
-from app.models.event import SceneEvent
-from app.models.link import CommLink
-from app.models.plan import CommPlan
-from app.models.task import CommTask
-from app.models.task_link import TaskLinkBinding
+from app.core.scene_clock import get_clock
+from app.db.repo import (
+    AlarmRepo, DemandRepo, EventRepo, LinkRepo, PlanRepo, TaskLinkRepo, TaskRepo,
+)
+from app.db.row import (
+    CommLinkRow, ResourceAlarmRow, SceneEventRow, TrafficDemandRow,
+)
 
 
-# ---------- 工具方法 ----------
+def _pending_demand_bookings() -> Dict[str, float]:
+    """读取未兑现的 task_booked / demand_change 事件 → {task_code: gbps}。
 
-def _gen_alarm_code() -> str:
-    """生成不依赖数据库 count 的告警主键，避免并发主键冲突。"""
-    return f"AL-{uuid.uuid4().hex[:8].upper()}"
+    用途：在 valid_to 失效点之后，任务的"最新需求"还在 comm_event 里没兑现，
+    仍要计入 predicted_load 的兜底，避免"0G 空档"导致 predicted_load 被低估。
 
-
-def _active_demand_gbps(db: Session, task_code: str, at_min: int) -> float:
-    """任务在 at_min 时刻的活跃需求速率。"""
-    rows: List[TrafficDemand] = list(
-        db.scalars(select(TrafficDemand).where(TrafficDemand.task_code == task_code))
-    )
-    g: float = 0.0
-    for d in rows:
-        if d.valid_from_min > at_min:
+    只取每个任务"最晚一条预订"，符合 future 的"折叠值"语义。
+    """
+    latest_per_task: Dict[str, float] = {}
+    for ev in EventRepo.list_all():
+        if ev.event_type != "task_booked" or ev.ref_type != "demand":
             continue
-        if d.valid_to_min is not None and at_min >= d.valid_to_min:
+        # 解析 summary: task=T-B;gbps=6.00;...
+        if not ev.summary:
             continue
-        g += float(d.demand_gbps or 0)
-    return g
+        task_code, gbps = None, None
+        for part in ev.summary.split(";"):
+            kv = part.split("=", 1)
+            if len(kv) != 2:
+                continue
+            k, v = kv[0].strip(), kv[1].strip()
+            if k == "task":
+                task_code = v
+            elif k == "gbps":
+                try:
+                    gbps = float(v)
+                except ValueError:
+                    pass
+        if task_code and gbps is not None:
+            # 多个预订时取最晚一条（最晚意味着占用影响最大）
+            if task_code not in latest_per_task or gbps > latest_per_task[task_code]:
+                latest_per_task[task_code] = gbps
+    return latest_per_task
 
 
-def _load_link_tasks(
-    db: Session, link_code: str
-) -> List[Tuple[CommTask, List[TrafficDemand]]]:
-    """读取该链路当前承载的所有任务，每个任务带出其全部需求。"""
-    # 1. 取出所有 comm_task_link 中 link_code 等于本链路的记录
-    bindings: List[TaskLinkBinding] = list(
-        db.scalars(
-            select(TaskLinkBinding)
-            .where(TaskLinkBinding.link_code == link_code)
-            .order_by(TaskLinkBinding.assigned_min.desc(), TaskLinkBinding.id.desc())
-        )
-    )
-    if not bindings:
-        return []
+# ============================================================
+# 工具
+# ============================================================
 
-    # 2. 每个 task_code 取 assigned_min 最大的一行（最新归属）
-    latest_per_task: Dict[str, TaskLinkBinding] = {}
+def _latest_tasks_on_link(link_code: str) -> Dict[str, List[TrafficDemandRow]]:
+    """返回 {task_code: [其全部 demand]}：该链路当前承载的任务。"""
+    bindings = TaskLinkRepo.list_by_link(link_code)
+    latest: Dict[str, Any] = {}
     for b in bindings:
-        latest_per_task.setdefault(b.task_code, b)
-
-    # 3. 取这些任务及其全部需求
-    task_codes: List[str] = list(latest_per_task.keys())
-    tasks: List[CommTask] = list(
-        db.scalars(select(CommTask).where(CommTask.task_code.in_(task_codes)))
-    )
-    demands: List[TrafficDemand] = list(
-        db.scalars(select(TrafficDemand).where(TrafficDemand.task_code.in_(task_codes)))
-    )
-    demands_by_task: Dict[str, List[TrafficDemand]] = {}
-    for d in demands:
-        demands_by_task.setdefault(d.task_code, []).append(d)
-
-    out: List[Tuple[CommTask, List[TrafficDemand]]] = []
-    for t in tasks:
-        out.append((t, demands_by_task.get(t.task_code, [])))
+        latest.setdefault(b.task_code, b)
+    if not latest:
+        return {}
+    # 验证「最新归属是否就是本链路」
+    task_codes = list(latest.keys())
+    all_latest = TaskLinkRepo.latest_per_task_global()
+    actual_codes = [tc for tc in task_codes if all_latest.get(tc) and all_latest[tc].link_code == link_code]
+    if not actual_codes:
+        return {}
+    out: Dict[str, List[TrafficDemandRow]] = {}
+    for tc in actual_codes:
+        out[tc] = DemandRepo.list_by_task(tc)
     return out
 
 
-def _has_pending_capacity_alarm(db: Session, link_code: str) -> bool:
-    """幂等检查：同一链路是否已存在未处理的「容量超限」告警。"""
-    stmt = select(ResourceAlarm).where(
-        ResourceAlarm.link_code == link_code,
-        ResourceAlarm.alarm_type == "容量超限",
-    )
-    return len(list(db.scalars(stmt))) > 0
+# ============================================================
+# 核心
+# ============================================================
 
-
-def _ensure_capacity_alarm(
-    db: Session, link_code: str, now: int, predicted_min: Optional[int]
-) -> Optional[ResourceAlarm]:
-    """幂等写入容量超限告警，返回新写入或已存在的告警。"""
-    if _has_pending_capacity_alarm(db, link_code):
-        return None
-    alarm = ResourceAlarm(
-        alarm_code=_gen_alarm_code(),
-        link_code=link_code,
-        alarm_type="容量超限",
-        native_severity="critical",
-        event_min=now,
-        predicted_min=predicted_min,
-    )
-    db.add(alarm)
-    db.flush()
-    return alarm
-
-
-# ---------- 核心算法 ----------
-
-def calc_occupancy(
-    db: Session,
-    link_code: str,
-    as_of_min: Optional[int] = None,
-) -> Dict[str, Any]:
-    """计算单条链路的占用与预警状态。"""
-    clock: SceneClock = get_clock()
+def calc_occupancy(link_code: str, as_of_min: Optional[int] = None) -> Dict[str, Any]:
+    clock = get_clock()
     now = as_of_min if as_of_min is not None else clock.now_min()
-
-    # 1. 取该链路当前承载的任务 + 全部需求
-    link: Optional[CommLink] = db.get(CommLink, link_code)
+    link = LinkRepo.get(link_code)
     if link is None:
         raise ValueError(f"链路不存在: {link_code}")
-    task_with_demands: List[Tuple[CommTask, List[TrafficDemand]]] = _load_link_tasks(
-        db, link_code
-    )
-    tasks: List[CommTask] = [t for t, _ in task_with_demands]
 
-    # 2. 当前占用
-    current: float = 0.0
-    for _t, demands in task_with_demands:
+    tasks_with_demands = _latest_tasks_on_link(link_code)
+    capacity = link.capacity_gbps or 0.0
+    warning = link.warning_gbps or 0.0
+
+    # 当前占用
+    current = 0.0
+    for tc, demands in tasks_with_demands.items():
         for d in demands:
-            if d.valid_from_min <= now and (
-                d.valid_to_min is None or now < d.valid_to_min
-            ):
-                current += float(d.demand_gbps or 0)
+            if d.valid_from_min <= now and (d.valid_to_min is None or now < d.valid_to_min):
+                current += d.demand_gbps or 0.0
 
-    # 4. 前瞻窗口
-    link_la: int = link.lookahead_min if link.lookahead_min else 30
-    tasks_la: List[int] = [t.lookahead_min if t.lookahead_min else 30 for t in tasks]
-    lookahead: int = max([link_la] + tasks_la + [30])
+    # 前瞻窗口
+    link_la = link.lookahead_min if link.lookahead_min else 30
+    tasks_la = [t.lookahead_min if t.lookahead_min else 30 for t in TaskRepo.list_all()]
+    lookahead = max([link_la] + tasks_la + [30])
 
-    # 5. 检查点集合：窗口终点 + 所有未来 valid_from_min
+    # 检查点：窗口终点 + 所有未来 valid_from_min + 所有未来 valid_to_min
+    # valid_to 也要纳入检查点，避免 D-B1(0-50) 这种有期限的需求在 T=50 失效后
+    # 出现 0G 空档导致 predicted_load 被低估。T+20 时也包含 T=50 检查点，
+    # 此时 D-B1 失效 → T-B 0G + D-A 3G + D-C 2G = 5G（说明书 T+20 行说明）。
+    # 但 T+15 时窗口 [15,45] 不含 50 → 不会命中，行为正确。
     checkpoints: Set[int] = {now + lookahead}
-    for _t, demands in task_with_demands:
+    for tc, demands in tasks_with_demands.items():
         for d in demands:
             if now < d.valid_from_min <= now + lookahead:
                 checkpoints.add(d.valid_from_min)
+            if d.valid_to_min is not None and now < d.valid_to_min <= now + lookahead:
+                checkpoints.add(d.valid_to_min)
 
-    # 6. 逐检查点求瞬时占用 → max_predicted + future
-    #    R2 语义统一：future 与 max_predicted 走同一套检查点求和。
-    #    - max_predicted：未来窗口内最大瞬时占用（含窗口终点 now+lookahead）
-    #    - future：未来窗口内第一个非当前检查点的瞬时占用
-    #      （即 min(checkpoints) 时刻的瞬时占用，与「下一个需求变化点」对齐）
-    max_predicted: float = 0.0
-    predicted_min: Optional[int] = None
-    future: float = 0.0
-    sorted_cps: List[int] = sorted(checkpoints)
-    for m_prime in sorted_cps:
-        pred: float = 0.0
-        for _t, demands in task_with_demands:
+    # 加载预订中的 demand 兜底（避免 0G 空档）
+    pending_bookings = _pending_demand_bookings()  # {task_code: gbps}
+
+    # 逐检查点
+    sorted_cps = sorted(checkpoints)
+    max_predicted = 0.0
+    predicted_min = None
+    future = 0.0
+    for m in sorted_cps:
+        total = 0.0
+        for tc, demands in tasks_with_demands.items():
             for d in demands:
-                if d.valid_from_min <= m_prime and (
-                    d.valid_to_min is None or m_prime < d.valid_to_min
-                ):
-                    pred += float(d.demand_gbps or 0)
-        if pred > max_predicted:
-            max_predicted = pred
-            predicted_min = m_prime
-    # future = 第一个非 now 的检查点时刻的瞬时占用
+                in_window = d.valid_from_min <= m and (d.valid_to_min is None or m < d.valid_to_min)
+                if in_window:
+                    total += d.demand_gbps or 0.0
+                else:
+                    # 兜底：d 在 m 时刻失效，但任务有更晚的预订需求（comm_event 待兑现）
+                    # 此时把预订的 gbps 计入，避免 0G 空档。
+                    if (d.valid_to_min is not None and d.valid_to_min == m
+                            and tc in pending_bookings):
+                        total += pending_bookings[tc]
+        if total > max_predicted:
+            max_predicted = total
+            predicted_min = m
     if sorted_cps:
-        first_cp: int = sorted_cps[0]
-        for d_check in task_with_demands:
-            for d in d_check[1]:
-                if d.valid_from_min <= first_cp and (
-                    d.valid_to_min is None or first_cp < d.valid_to_min
-                ):
-                    future += float(d.demand_gbps or 0)
+        first_cp = sorted_cps[0]
+        for tc, demands in tasks_with_demands.items():
+            for d in demands:
+                if d.valid_from_min <= first_cp and (d.valid_to_min is None or first_cp < d.valid_to_min):
+                    future += d.demand_gbps or 0.0
+            # 兜底：如果 first_cp 处任务所有需求都失效，但有预订需求
+            if tc in pending_bookings and not any(
+                d.valid_from_min <= first_cp and (d.valid_to_min is None or first_cp < d.valid_to_min)
+                for d in demands
+            ):
+                future += pending_bookings[tc]
 
-    # 7. 三级判定（严格大于）
-    capacity = float(link.capacity_gbps or 0)
-    warning = float(link.warning_gbps or 0)
+    # 判定
     if current > capacity:
         warn_status = "超容量"
     elif max_predicted > capacity:
@@ -191,62 +160,47 @@ def calc_occupancy(
     else:
         warn_status = "正常"
 
-    # 8. 回写链路字段
-    previous_status: Optional[str] = link.warn_status
-    link.current_load_gbps = round(current, 2)
-    link.future_load_gbps = round(future, 2)
-    link.warn_status = warn_status
+    # 回写
+    previous = link.warn_status
+    LinkRepo.update_loads(link_code, round(current, 2), round(future, 2), warn_status)
 
-    # 9. 超容量 → 幂等写容量超限告警
-    new_alarm: Optional[ResourceAlarm] = None
+    # 容量超限 → 幂等写告警
+    new_alarm = None
     if warn_status == "超容量":
-        new_alarm = _ensure_capacity_alarm(db, link_code, now, predicted_min)
+        if not AlarmRepo.has_pending_capacity_alarm(link_code):
+            from uuid import uuid4
+            code = f"AL-{uuid4().hex[:8].upper()}"
+            new_alarm = ResourceAlarmRow(
+                alarm_code=code, link_code=link_code, alarm_type="容量超限",
+                native_severity="critical", event_min=now, predicted_min=predicted_min,
+            )
+            AlarmRepo.insert(new_alarm)
 
-    # 10. 写事件流水
+    # 事件流水
     if new_alarm is not None:
-        db.add(
-            SceneEvent(
-                event_code=f"EVT-OE-{datetime.now().strftime('%H%M%S%f')}",
-                event_type="occupancy_exceeded",
-                ref_type="alarm",
-                ref_code=new_alarm.alarm_code,
-                occur_min=now,
-                summary=(
-                    f"{link_code} 预测 T+{predicted_min - now if predicted_min else '?'}"
-                    f" 达 {round(max_predicted, 2)}G 超容量 {capacity}G"
-                ),
-            )
-        )
-    elif previous_status != warn_status:
-        db.add(
-            SceneEvent(
-                event_code=f"EVT-SC-{datetime.now().strftime('%H%M%S%f')}",
-                event_type="state_changed",
-                ref_type="link",
-                ref_code=link_code,
-                occur_min=now,
-                summary=f"{link_code} {previous_status or '无'} -> {warn_status}",
-            )
-        )
+        EventRepo.insert(SceneEventRow(
+            event_code=f"EVT-OE-{datetime.now().strftime('%H%M%S%f')}",
+            event_type="occupancy_exceeded", ref_type="alarm", ref_code=new_alarm.alarm_code,
+            occur_min=now,
+            summary=f"{link_code} 预测 T+{predicted_min - now if predicted_min else '?'} "
+                    f"达 {round(max_predicted, 2)}G 超容量 {capacity}G",
+        ))
+    elif previous != warn_status:
+        EventRepo.insert(SceneEventRow(
+            event_code=f"EVT-SC-{datetime.now().strftime('%H%M%S%f')}",
+            event_type="state_changed", ref_type="link", ref_code=link_code,
+            occur_min=now, summary=f"{link_code} {previous or '无'} -> {warn_status}",
+        ))
 
-    db.flush()
-
-    # 11. ws 推送 toast（跨 loop 安全：safe_create_task）
+    # ws 提示
     if warn_status in ("超预警线", "超容量"):
         if warn_status == "超预警线":
-            level = "warn"
-            message = (
-                f"{link_code} 未来占用 {round(future, 2)}G 超预警线 {warning}G"
-            )
+            message = f"{link_code} 未来占用 {round(future, 2)}G 超预警线 {warning}G"
         else:
-            level = "error"
             offset = predicted_min - now if predicted_min is not None else None
-            message = (
-                f"{link_code} 预测T+{offset}达{round(max_predicted, 2)}G超容量{capacity}G"
-            )
+            message = f"{link_code} 预测T+{offset}达{round(max_predicted, 2)}G超容量{capacity}G"
         from app.services.engine import safe_push
-
-        safe_push("toast", {"level": level, "message": message})
+        safe_push("toast", {"level": "warn" if warn_status == "超预警线" else "error", "message": message})
 
     return {
         "link_code": link_code,
@@ -258,82 +212,41 @@ def calc_occupancy(
     }
 
 
-# ---------- 全局重算 ----------
+def recalc_all(as_of_min: Optional[int] = None) -> List[Dict[str, Any]]:
+    """遍历所有 up 链路计算占用 + 触发 ACT-03。"""
+    from app.db.repo import PlanRepo
+    from app.services.plan import generate_plans
 
-def recalc_all(db: Session, as_of_min: Optional[int] = None) -> List[Dict[str, Any]]:
-    """遍历所有 oper_state='up' 的链路，逐一调用 calc_occupancy。
-
-    对 warn_status='超容量' 的链路，若尚无「待审批」方案，自动调用 plan.generate_plans。
-    """
-    up_links: List[CommLink] = list(
-        db.scalars(select(CommLink).where(CommLink.oper_state == "up"))
-    )
-    results: List[Dict[str, Any]] = []
-    for l in up_links:
-        r = calc_occupancy(db, l.link_code, as_of_min=as_of_min)
+    links = [l for l in LinkRepo.list_all() if l.oper_state == "up"]
+    results = []
+    for l in links:
+        r = calc_occupancy(l.link_code, as_of_min=as_of_min)
         results.append(r)
 
-    # 超容量且无待审批方案 → 触发 ACT-03
     for r in results:
         if r["warn_status"] != "超容量":
             continue
-        link_code: str = r["link_code"]
-        # 找最近一条该链路的容量超限告警
-        cap_alarm = db.scalar(
-            select(ResourceAlarm)
-            .where(
-                ResourceAlarm.link_code == link_code,
-                ResourceAlarm.alarm_type == "容量超限",
-            )
-            .order_by(ResourceAlarm.event_min.desc())
-            .limit(1)
-        )
+        link_code = r["link_code"]
+        cap_alarm = AlarmRepo.latest_capacity_alarm(link_code)
         if cap_alarm is None:
             continue
-        # 边界6：以 alarm_code 维度做幂等检查。
-        # 不同告警（哪怕同链路）即使都触发容量超限，也应各自生成方案。
-        # generate_plans_for_alarm 内部已按 alarm_code+status='待审批' 幂等，
-        # 这里再防御一遍，避免新告警被旧告警的待审批方案「吃掉」。
-        pending = list(
-            db.scalars(
-                select(CommPlan).where(
-                    CommPlan.alarm_code == cap_alarm.alarm_code,
-                    CommPlan.status == "待审批",
-                )
-            )
-        )
-
-        # 边界8：预测超限点距当前不足 60 秒（V4.1 1:1 → 1 场景分钟），
-        # 走 R3 硬约束：作废旧方案并立即重生一组新方案。
+        pending = PlanRepo.list_pending_by_alarm(cap_alarm.alarm_code)
         now = as_of_min if as_of_min is not None else get_clock().now_min()
         predicted_min = r.get("predicted_min")
-        imminent: bool = (
-            predicted_min is not None and (predicted_min - now) <= 1
-        )
+        imminent = predicted_min is not None and (predicted_min - now) <= 1
         if pending and not imminent:
             continue
         if pending and imminent:
-            # 把旧待审批方案作废，避免新弹窗与旧弹窗并存
             for p in pending:
-                p.status = "已作废"
-            # 取消该告警组的倒计时（人类决策不再有意义）
+                PlanRepo.update_status(p.plan_code, "已作废")
             try:
                 from app.services.approval import _cancel_countdown
-
                 _cancel_countdown(cap_alarm.alarm_code)
             except Exception:
                 pass
-        # 局部 import 避免循环依赖
-        from app.services.plan import generate_plans_for_alarm
-
-        generate_plans_for_alarm(db, cap_alarm.alarm_code)
-
-    db.flush()
+        generate_plans(alarm_link_code=link_code, as_of_min=as_of_min)
     return results
 
 
-# ---------- 兼容旧接口 ----------
-
-def update_link_loads(db: Session) -> None:
-    """兼容旧调用：等价于 recalc_all。"""
-    recalc_all(db)
+def update_link_loads() -> None:
+    recalc_all()

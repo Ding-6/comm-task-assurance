@@ -34,6 +34,38 @@ _VALUE_LOOSE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*G\b", re.IGNORECASE)
 _EST_RE = re.compile(r"(?:预计|约)?\s*(\d+)\s*(?:分钟|分)(?:完成|修好|修复|完成)?")
 
 
+# ---------- 识别失败时的可点选建议 ----------
+# 前端收到 category=null 时展示该列表，用户点击其中一项等价于把
+# message 文本替换为对应 example 再次提交，从而让系统不会猜测。
+SUGGESTIONS: List[Dict[str, str]] = [
+    {
+        "sub_type": "link_down",
+        "label": "线路故障",
+        "example": "线路1故障 / 20分钟后L-2H故障",
+    },
+    {
+        "sub_type": "performance_degrade",
+        "label": "性能劣化",
+        "example": "L-2H性能劣化",
+    },
+    {
+        "sub_type": "demand_change",
+        "label": "需求变更",
+        "example": "50分钟后直播需求到6G",
+    },
+    {
+        "sub_type": "link_restored",
+        "label": "链路恢复",
+        "example": "线路1修好了",
+    },
+    {
+        "sub_type": "repair_receipt",
+        "label": "修理回执",
+        "example": "修理单预计55分钟完成",
+    },
+]
+
+
 def _extract_link(text: str) -> Optional[str]:
     """从文本里识别链路编码。"""
     # 1. 规范化 L-xH / LxH → L-{1|2|3}H
@@ -84,20 +116,34 @@ def _extract_est_finish(text: str) -> Optional[int]:
 def parse_input(text: str) -> Dict[str, Any]:
     """自然语言 → 结构化动作。
 
-    返回：
+    成功识别：
         {
-          "category": "alarm" | "notice" | None,
-          "sub_type": str | None,
+          "category": "alarm" | "notice",
+          "sub_type": str,
           "link_code": str | None,
           "task_code": str | None,
           "minute_offset": int | None,
           "value": float | None,
           "est_finish_min": int | None,
-          "action": str | None,
+          "action": str,
           "params": dict,
           "raw": str,
-          "message": str | None,   # 识别失败时填
+          "message": None,
         }
+
+    识别失败（category=None）：
+        {
+          "category": None,
+          "sub_type": None,
+          "message": "无法识别：缺少线路编号或任务名。系统不会猜测，也不会执行。",
+          "suggestions": [
+            {"sub_type": "...", "label": "...", "example": "..."},
+            ...
+          ],
+          "raw": str,
+        }
+        —— 不携带 link_code / task_code / action 等业务字段，
+           前端收到后展示 suggestions 让用户点选，不直接执行。
     """
     raw: str = (text or "").strip()
     t: str = raw
@@ -173,17 +219,14 @@ def parse_input(text: str) -> Dict[str, Any]:
                 "message": None,
             }
 
-    # ---------- 4. 链路故障（事故类） ----------
-    if any(k in t for k in ("故障", "断了", "中断", "挂了", "down")):
+    # ---------- 4. 性能劣化（事故类，需独立分支：不依赖"故障"字眼） ----------
+    if "性能" in t and ("劣化" in t or "降级" in t or "下降" in t):
         link_code = _extract_link(t)
         if link_code is not None:
             minute_offset = _extract_minute_offset(t)
-            is_perf = "性能" in t or "劣化" in t or "降级" in t
-            sub_type = "performance_degrade" if is_perf else "link_down"
-            alarm_type = "性能劣化" if is_perf else "link_down"
             return {
                 "category": "alarm",
-                "sub_type": sub_type,
+                "sub_type": "performance_degrade",
                 "link_code": link_code,
                 "task_code": None,
                 "minute_offset": minute_offset,
@@ -192,7 +235,31 @@ def parse_input(text: str) -> Dict[str, Any]:
                 "action": "POST /api/comm/alarm",
                 "params": {
                     "link_code": link_code,
-                    "alarm_type": alarm_type,
+                    "alarm_type": "性能劣化",
+                    "native_severity": "critical",
+                    "minute_offset": minute_offset,
+                },
+                "raw": raw,
+                "message": None,
+            }
+
+    # ---------- 5. 链路故障（事故类） ----------
+    if any(k in t for k in ("故障", "断了", "中断", "挂了", "down")):
+        link_code = _extract_link(t)
+        if link_code is not None:
+            minute_offset = _extract_minute_offset(t)
+            return {
+                "category": "alarm",
+                "sub_type": "link_down",
+                "link_code": link_code,
+                "task_code": None,
+                "minute_offset": minute_offset,
+                "value": None,
+                "est_finish_min": None,
+                "action": "POST /api/comm/alarm",
+                "params": {
+                    "link_code": link_code,
+                    "alarm_type": "link_down",
                     "native_severity": "critical",
                     "minute_offset": minute_offset,  # 预订
                 },
@@ -200,19 +267,15 @@ def parse_input(text: str) -> Dict[str, Any]:
                 "message": None,
             }
 
-    # ---------- 兜底 ----------
+    # ---------- 兜底：识别失败 ----------
+    # 不携带 link_code / task_code / action 等业务字段，
+    # 前端展示 suggestions 让用户点选，不直接执行。
     return {
         "category": None,
         "sub_type": None,
-        "link_code": _extract_link(t),
-        "task_code": _extract_task(t),
-        "minute_offset": None,
-        "value": None,
-        "est_finish_min": None,
-        "action": None,
-        "params": {},
+        "message": "无法识别：缺少线路编号或任务名。系统不会猜测，也不会执行。",
+        "suggestions": SUGGESTIONS,
         "raw": raw,
-        "message": "无法识别，请补充链路/任务名称",
     }
 
 
