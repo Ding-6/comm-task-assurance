@@ -17,6 +17,11 @@
       <span class="hint" style="margin:0">带「N 分钟后」登记为预订，到点兑现；不带时间立即生效</span>
       <button class="btn pri" style="margin-left:auto" @click="submit">提交</button>
     </div>
+
+    <div class="row" style="margin-top: 8px;">
+      <button class="btn" @click="emit('open-task')">＋ 添加任务</button>
+      <button class="btn" @click="emit('open-link')">＋ 添加链路</button>
+    </div>
   </section>
 </template>
 
@@ -28,7 +33,9 @@ import { postSceneInput } from '../utils/api';
 const props = defineProps({
   hint: { type: String, default: '' }, // 来自设计稿的预填文本
 });
-const emit = defineEmits(['submit']);
+// 修复（minor 5）：声明 open-task / open-link 事件，DashboardScene 才能弹出
+// TaskFormDialog / LinkFormDialog
+const emit = defineEmits(['submit', 'open-task', 'open-link']);
 
 const text = ref(props.hint || '');
 const parsed = ref(null);

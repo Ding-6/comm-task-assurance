@@ -57,7 +57,12 @@
       </section>
 
       <aside class="col col-r">
-        <InputPanel :hint="hint" @submit="onSubmit" @open-task="taskForm=true" @open-link="linkForm=true" />
+        <InputPanel
+          :hint="hint"
+          @submit="onSubmit"
+          @open-task="taskForm = true"
+          @open-link="linkForm = true"
+        />
         <div class="card booking">
           <h3>
             预订事件队列
