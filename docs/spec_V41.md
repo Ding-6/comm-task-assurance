@@ -10,7 +10,7 @@
   对象类型   8 类（CommTask / CommLink / TrafficDemand / ResourceAlarm / ApprovalRecord / CommPlan / RepairOrder / SceneEvent）
   关系类型   8 种（任务占用链路 / 链路互为备用 / 告警发生于链路 / 需求关联任务 / 审批针对方案 / 方案处置告警 / 修理单针对链路 / 事件引用对象）
   动作类型   6 个（ACT-01 切换 / ACT-02 占用预警 / ACT-03 方案生成 / ACT-04 审批决策 / ACT-05 修理回执评估 / ACT-06 回迁释放）
-  能力接口   15 个业务能力 + 8 个引擎接口（含 1 个 WebSocket，含 5 路实时推送事件类型）
+  能力接口   15 个业务能力 + 8 个引擎接口（含 1 个 WebSocket，含 8 路实时推送消息类型：state / toast / modal_approval / modal_refresh / modal_close / modal_notice / alert / engine_error）
   物理表     9 张（comm_task / comm_link / comm_demand / comm_alarm / comm_task_link / comm_approval / comm_plan / comm_repair_order / comm_event）
   数据源     zb_db2 @ 172.17.6.242:5904（本体平台同源）
   场景时钟   实时时钟，1:1 对应演示真实时间；以启动时刻为 T+0，T+N 即真实经过 N 分钟
@@ -921,7 +921,7 @@ SK-06 / SK-10 / SK-07 / SK-05。
 
 ## 7.3 WebSocket 实时推送事件类型
 
-WS /api/scene/ws 推送 5 类消息，对齐业务说明书 §6.4 "如何通知你"的呈现规范：
+WS /api/scene/ws 推送 8 类消息，对齐业务说明书 §6.4 "如何通知你"的呈现规范：
 
 | 消息类型 | 触发动作 | 载荷 | 前端表现 | 业务说明书对应 |
 |---|---|---|---|---|
@@ -931,6 +931,8 @@ WS /api/scene/ws 推送 5 类消息，对齐业务说明书 §6.4 "如何通知�
 | modal_approval | ACT-03 | {alarm_code, plans, countdown, deadline_min} | 模态框 + 60s倒计时 | §6.4 模态框 + 倒计时 |
 | modal_refresh | ACT-05（审批挂起中） | {plans, fresh_message, reset_countdown:false} | 模态框实时刷新 | §6.5 / TC-06 |
 | modal_close | ACT-04（含超时自动） | {approval_code, decision, decision_source} | 关闭模态框 | §6.4 关闭模态框 |
+| alert | 关键告警（资源类 + 容量类，前瞻命中） | {level, code, message} | 顶部高亮提示条 + 蜂鸣 | §6.4 顶部提示条（升级版） |
+| engine_error | 引擎 tick 异常 | {error: str} | 控制台 + Toast 红条 | 异常可观测性 |
 
 **幂等与去重**：同一告警的 modal_approval 同一分钟内不会重复推送（ACT-03 以"告警+方案类型+故障链路"为幂等键）；同一模态框关闭后再次触发需新告警。
 
