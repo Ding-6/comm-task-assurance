@@ -231,10 +231,21 @@ def recalc_all(as_of_min: Optional[int] = None) -> List[Dict[str, Any]]:
         if cap_alarm is None:
             continue
         pending = PlanRepo.list_pending_by_alarm(cap_alarm.alarm_code)
+        # 修复（major 3）：同一告警下若已存在已决方案（批准/已执行/拒绝），
+        # 且没有待审批方案，则不再重复生成新方案；否则每 tick 都会追加
+        # PLAN-L-X-REPAIR-02 / -03 ... 同一告警被反复推 modal_approval。
+        decided = [
+            p for p in PlanRepo.list_by_alarm(cap_alarm.alarm_code)
+            if p.status in ("批准", "已执行", "拒绝", "已作废")
+        ]
         now = as_of_min if as_of_min is not None else get_clock().now_min()
         predicted_min = r.get("predicted_min")
         imminent = predicted_min is not None and (predicted_min - now) <= 1
         if pending and not imminent:
+            continue
+        if decided and not pending:
+            # 该告警的方案已决（无论批准/拒绝），不再重复生成；
+            # 除非新一轮容量告警 episode 发生（latest_capacity_alarm 改变）才允许。
             continue
         if pending and imminent:
             for p in pending:
